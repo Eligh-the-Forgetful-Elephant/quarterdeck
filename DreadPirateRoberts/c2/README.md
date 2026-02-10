@@ -108,6 +108,8 @@
 - **exec** \<cmd\> – Run shell command on selected session (POST /op/exec).
 - **kill** – Drop a session (POST /op/kill; see API).
 - **health** – GET /op/health for server status.
+- **Session history** – GET /op/sessions/history returns the last 100 past sessions (id, addr, first_seen, last_seen), persisted to `c2_sessions.jsonl` across restarts.
+- **File operations** – Upload, download, and list directory on a session via POST /op/upload, /op/download, /op/listdir when the implant supports them (Go client and PowerShell implant do). Use the Web UI File Manager or the API; see RUNBOOK and WEB_UI_API.md.
 
 ### Client Features
 - Automatic reconnection (30s backoff).

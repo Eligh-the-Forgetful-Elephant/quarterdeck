@@ -5,15 +5,11 @@ WORKDIR /app
 # Install build dependencies
 RUN apk add --no-cache gcc musl-dev
 
-# Copy go mod files
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Copy source code
+# Copy source code (server has its own go.mod and replace for common)
 COPY . .
 
-# Build the application
-RUN go build -o c2server ./server
+# Build from server directory so c2/server and c2/common modules are used
+RUN cd server && go build -o c2server . && mv c2server /app/
 
-# Run the server
+# Run the server (certs mounted at /app/server.crt, /app/server.key)
 CMD ["./c2server"] 

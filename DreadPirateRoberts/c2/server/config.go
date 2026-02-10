@@ -7,6 +7,9 @@ import (
 	"log"
 )
 
+// configFilePath is the path to config.json; tests may override it.
+var configFilePath = "config.json"
+
 type ServerConfig struct {
 	Port         int    `json:"port"`
 	CertFile     string `json:"cert_file"`
@@ -29,7 +32,7 @@ func LoadConfig() *ServerConfig {
 	}
 
 	// Try to load from config file
-	if data, err := ioutil.ReadFile("config.json"); err == nil {
+	if data, err := ioutil.ReadFile(configFilePath); err == nil {
 		if err := json.Unmarshal(data, config); err != nil {
 			log.Printf("Error loading config: %v", err)
 		}
@@ -43,7 +46,7 @@ func (c *ServerConfig) Save() error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile("config.json", data, 0644)
+	return ioutil.WriteFile(configFilePath, data, 0644)
 }
 
 func (c *ServerConfig) GetTLSConfig() (*tls.Config, error) {

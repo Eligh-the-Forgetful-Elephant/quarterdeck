@@ -12,10 +12,11 @@ Point the UI at the server (same port as TLS):
 
 ## Endpoints
 
-| Method | Path          | Auth            | Body / response |
-|--------|---------------|-----------------|------------------|
-| GET    | /op/sessions  | X-Op-Token or ?k= | List of `{id, addr}` |
-| GET    | /op/health    | X-Op-Token or ?k= | `{ok, sessions}` |
+| Method | Path                   | Auth            | Body / response |
+|--------|------------------------|-----------------|------------------|
+| GET    | /op/sessions           | X-Op-Token or ?k= | List of `{id, addr}` (live sessions only). |
+| GET    | /op/sessions/history   | X-Op-Token or ?k= | List of `{id, addr, first_seen, last_seen}` (last 100 past sessions, persisted across restarts). |
+| GET    | /op/health             | X-Op-Token or ?k= | `{ok, sessions}` |
 | POST   | /op/exec      | X-Op-Token or ?k= | Body: `{session_id, command}`. Response: `{session_id, command_id, status, output, error}` (blocks up to 90s). |
 | POST   | /op/kill      | X-Op-Token or ?k= | Body: `{session_id}`. Drops the session. |
 | POST   | /op/upload    | X-Op-Token or ?k= | Body: `{session_id, path, content}` (content base64). Response: `{status, output, error}`. |
@@ -28,6 +29,7 @@ CORS is enabled for `/op/*` so the browser can call the server from another orig
 
 - **Dashboard:** `GET /op/health` for server reachable and session count.
 - **Clients:** `GET /op/sessions`, Kill button calls `POST /op/kill`.
+- **Session history:** `GET /op/sessions/history` for past sessions (id, addr, first_seen, last_seen); refresh button to reload.
 - **Console:** dropdown from `/op/sessions`, command input, `POST /op/exec`, append output to log.
 - **File Manager:** session + path, List = `POST /op/listdir`, Download = `POST /op/download`, Upload = `POST /op/upload`.
 - **Settings:** display-only for REACT_APP_API_URL and op token.

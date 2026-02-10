@@ -17,6 +17,7 @@ import {
   Menu as MenuIcon,
   Dashboard as DashboardIcon,
   Computer as ComputerIcon,
+  History as HistoryIcon,
   Terminal as TerminalIcon,
   Folder as FolderIcon,
   Settings as SettingsIcon,
@@ -38,6 +39,7 @@ const Layout: React.FC = () => {
   const menuItems = [
     { text: 'Dashboard', icon: <DashboardIcon />, path: '/' },
     { text: 'Clients', icon: <ComputerIcon />, path: '/clients' },
+    { text: 'Session history', icon: <HistoryIcon />, path: '/history' },
     { text: 'Console', icon: <TerminalIcon />, path: '/console' },
     { text: 'Files', icon: <FolderIcon />, path: '/files' },
     { text: 'Settings', icon: <SettingsIcon />, path: '/settings' },

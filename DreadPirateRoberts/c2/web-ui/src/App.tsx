@@ -4,6 +4,7 @@ import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
 import Layout from './components/Layout';
 import Dashboard from './components/Dashboard';
 import Clients from './components/Clients';
+import SessionHistory from './components/SessionHistory';
 import Console from './components/Console';
 import FileManager from './components/FileManager';
 import Settings from './components/Settings';
@@ -72,6 +73,7 @@ const App: React.FC = () => {
           <Route path="/" element={<Layout />}>
             <Route index element={<Dashboard />} />
             <Route path="clients" element={<Clients />} />
+            <Route path="history" element={<SessionHistory />} />
             <Route path="console" element={<Console />} />
             <Route path="files" element={<FileManager />} />
             <Route path="settings" element={<Settings />} />

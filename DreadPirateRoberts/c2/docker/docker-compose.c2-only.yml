@@ -1,0 +1,28 @@
+# Minimal stack: C2 server + Web UI only. UI talks to C2 at https://localhost:8443.
+# From repo root: docker-compose -f docker/docker-compose.c2-only.yml up --build
+# Then open http://localhost:3000 (accept self-signed cert for https://localhost:8443 in browser if prompted).
+
+version: '3.8'
+
+services:
+  c2-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.c2
+    ports:
+      - "8443:8443"
+    volumes:
+      - ../server/server.crt:/app/server.crt
+      - ../server/server.key:/app/server.key
+
+  web-ui:
+    build:
+      context: ../web-ui
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_API_URL: https://localhost:8443
+        REACT_APP_OP_TOKEN: ""
+    ports:
+      - "3000:3000"
+    depends_on:
+      - c2-server

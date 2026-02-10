@@ -1,3 +1,5 @@
+# This compose file includes api, db, and redis for possible future use.
+# For C2-only deployment (server + web UI), use: docker-compose -f docker/docker-compose.c2-only.yml up
 version: '3.8'
 
 services:

