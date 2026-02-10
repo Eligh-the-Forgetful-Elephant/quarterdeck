@@ -1,6 +1,6 @@
 # Web UI and server API
 
-The server exposes an operator API so the web UI (or any client) can list sessions and run commands without a TTY.
+The server exposes an operator API so the web UI (or any client) can list sessions, run commands, and manage files without a TTY.
 
 ## API base URL
 
@@ -12,16 +12,24 @@ Point the UI at the server (same port as TLS):
 
 ## Endpoints
 
-| Method | Path         | Auth           | Body / response |
-|--------|--------------|----------------|------------------|
-| GET    | /op/sessions | X-Op-Token or ?k= | List of `{id, addr}` |
-| POST   | /op/exec     | X-Op-Token or ?k= | Body: `{session_id, command}`. Response: `{session_id, command_id, status, output, error}` (blocks until client responds or 90s). |
+| Method | Path          | Auth            | Body / response |
+|--------|---------------|-----------------|------------------|
+| GET    | /op/sessions  | X-Op-Token or ?k= | List of `{id, addr}` |
+| GET    | /op/health    | X-Op-Token or ?k= | `{ok, sessions}` |
+| POST   | /op/exec      | X-Op-Token or ?k= | Body: `{session_id, command}`. Response: `{session_id, command_id, status, output, error}` (blocks up to 90s). |
+| POST   | /op/kill      | X-Op-Token or ?k= | Body: `{session_id}`. Drops the session. |
+| POST   | /op/upload    | X-Op-Token or ?k= | Body: `{session_id, path, content}` (content base64). Response: `{status, output, error}`. |
+| POST   | /op/download  | X-Op-Token or ?k= | Body: `{session_id, path}`. Response: `{status, output, error}` (output is file content base64). |
+| POST   | /op/listdir   | X-Op-Token or ?k= | Body: `{session_id, path}`. Response: `{status, output, error}` (output is JSON array of `{name, dir, size}`). |
 
 CORS is enabled for `/op/*` so the browser can call the server from another origin (e.g. UI on port 3000, server on 8443).
 
 ## Wiring the UI
 
-- **Clients** page: `GET /op/sessions` and render rows (id, addr).
-- **Console** page: dropdown from `/op/sessions`, command input, on Send do `POST /op/exec` and append the response output to the console log.
+- **Dashboard:** `GET /op/health` for server reachable and session count.
+- **Clients:** `GET /op/sessions`, Kill button calls `POST /op/kill`.
+- **Console:** dropdown from `/op/sessions`, command input, `POST /op/exec`, append output to log.
+- **File Manager:** session + path, List = `POST /op/listdir`, Download = `POST /op/download`, Upload = `POST /op/upload`.
+- **Settings:** display-only for REACT_APP_API_URL and op token.
 
 See RUNBOOK.md for full server and API usage.

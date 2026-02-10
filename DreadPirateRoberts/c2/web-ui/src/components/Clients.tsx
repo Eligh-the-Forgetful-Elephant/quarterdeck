@@ -11,7 +11,7 @@ import {
   Typography,
   IconButton,
 } from '@mui/material';
-import { Refresh as RefreshIcon } from '@mui/icons-material';
+import { Refresh as RefreshIcon, Delete as KillIcon } from '@mui/icons-material';
 
 const API_BASE = process.env.REACT_APP_API_URL || '';
 const OP_TOKEN = process.env.REACT_APP_OP_TOKEN || '';
@@ -22,6 +22,20 @@ const Clients: React.FC = () => {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const killSession = async (id: string) => {
+    if (!API_BASE || !window.confirm(`Drop session ${id}?`)) return;
+    const headers: HeadersInit = { 'Content-Type': 'application/json' };
+    if (OP_TOKEN) headers['X-Op-Token'] = OP_TOKEN;
+    try {
+      const res = await fetch(`${API_BASE}/op/kill`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ session_id: id }),
+      });
+      if (res.ok) fetchSessions();
+    } catch (_) {}
+  };
 
   const fetchSessions = async () => {
     if (!API_BASE) {
@@ -79,12 +93,13 @@ const Clients: React.FC = () => {
             <TableRow>
               <TableCell>Session ID</TableCell>
               <TableCell>Address</TableCell>
+              <TableCell align="right">Actions</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {sessions.length === 0 && !loading && (
               <TableRow>
-                <TableCell colSpan={2} align="center">
+                <TableCell colSpan={3} align="center">
                   <Typography color="textSecondary">
                     No clients connected
                   </Typography>
@@ -95,6 +110,11 @@ const Clients: React.FC = () => {
               <TableRow key={s.id}>
                 <TableCell>{s.id}</TableCell>
                 <TableCell>{s.addr}</TableCell>
+                <TableCell align="right">
+                  <IconButton size="small" onClick={() => killSession(s.id)} title="Drop session">
+                    <KillIcon />
+                  </IconButton>
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>

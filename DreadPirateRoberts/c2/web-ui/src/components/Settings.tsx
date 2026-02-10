@@ -4,12 +4,11 @@ import {
   Paper,
   Typography,
   TextField,
-  Switch,
-  FormControlLabel,
-  Button,
   Grid,
 } from '@mui/material';
-import { Save as SaveIcon } from '@mui/icons-material';
+
+const API_BASE = process.env.REACT_APP_API_URL || '';
+const OP_TOKEN = process.env.REACT_APP_OP_TOKEN || '';
 
 const Settings: React.FC = () => {
   return (
@@ -21,62 +20,36 @@ const Settings: React.FC = () => {
         <Grid item xs={12} md={6}>
           <Paper sx={{ p: 3 }}>
             <Typography variant="h6" gutterBottom>
-              Server Configuration
+              Operator API (read-only)
+            </Typography>
+            <Typography variant="body2" color="textSecondary" sx={{ mb: 2 }}>
+              Configure via environment when building or serving the app. Restart required to apply changes.
             </Typography>
             <Grid container spacing={2}>
               <Grid item xs={12}>
                 <TextField
                   fullWidth
-                  label="Server Port"
-                  value="8443"
+                  label="API URL (REACT_APP_API_URL)"
+                  value={API_BASE || '(not set)'}
                   disabled
+                  size="small"
                 />
               </Grid>
-              <Grid item xs={12}>
-                <FormControlLabel
-                  control={<Switch checked disabled />}
-                  label="Enable TLS"
-                />
-              </Grid>
-            </Grid>
-          </Paper>
-        </Grid>
-        <Grid item xs={12} md={6}>
-          <Paper sx={{ p: 3 }}>
-            <Typography variant="h6" gutterBottom>
-              Client Configuration
-            </Typography>
-            <Grid container spacing={2}>
               <Grid item xs={12}>
                 <TextField
                   fullWidth
-                  label="Heartbeat Interval (seconds)"
-                  value="30"
+                  label="Op token (REACT_APP_OP_TOKEN)"
+                  value={OP_TOKEN ? '••••••••' : '(not set)'}
                   disabled
-                />
-              </Grid>
-              <Grid item xs={12}>
-                <FormControlLabel
-                  control={<Switch checked disabled />}
-                  label="Enable Stealth Mode"
+                  size="small"
                 />
               </Grid>
             </Grid>
           </Paper>
         </Grid>
       </Grid>
-      <Box sx={{ mt: 3, display: 'flex', justifyContent: 'flex-end' }}>
-        <Button
-          variant="contained"
-          color="primary"
-          startIcon={<SaveIcon />}
-          disabled
-        >
-          Save Settings
-        </Button>
-      </Box>
     </Box>
   );
 };
 
-export default Settings; 
+export default Settings;

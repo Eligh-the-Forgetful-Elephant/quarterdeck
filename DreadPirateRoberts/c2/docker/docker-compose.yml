@@ -28,7 +28,7 @@ services:
       - REDIS_HOST=redis
       - JWT_SECRET=changeme_in_production
 
-  # C2 Server - Our existing Go server
+  # C2 Server - Go server (no DB; sessions in-memory)
   c2-server:
     build:
       context: ..
@@ -36,11 +36,8 @@ services:
     ports:
       - "8443:8443"
     volumes:
-      - ../server.crt:/app/server.crt
-      - ../server.key:/app/server.key
-    depends_on:
-      - db
-      - redis
+      - ../server/server.crt:/app/server.crt
+      - ../server/server.key:/app/server.key
 
   # Database - PostgreSQL
   db:

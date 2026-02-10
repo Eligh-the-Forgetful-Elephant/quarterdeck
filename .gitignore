@@ -7,11 +7,11 @@ venv/
 __pycache__/
 *.pyc
 
-# C2 build artifacts
+# C2 build artifacts (binary names only; keep client/ source)
 bin/
 *.exe
 **/c2server
-**/client
+**/client/client
 **/implant
 
 # Certs (regenerate with generate_certs.sh)

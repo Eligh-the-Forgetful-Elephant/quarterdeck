@@ -12,10 +12,12 @@ import (
 
 // Command types
 const (
-	CmdPing   = "ping"
-	CmdExec   = "exec"
-	CmdFetch  = "fetch"
-	CmdUpload = "upload"
+	CmdPing     = "ping"
+	CmdExec     = "exec"
+	CmdFetch    = "fetch"
+	CmdUpload   = "upload"
+	CmdDownload = "download"
+	CmdListDir  = "listdir"
 )
 
 // Command represents a command to be executed

@@ -9,10 +9,9 @@
 - Command execution and response handling
 
 ### 2. Client Implementation
-- WebSocket client with TLS support
-- Command execution capabilities
-- File upload/download functionality
-- Heartbeat mechanism
+- **Go client** (cross‑platform): WebSocket with TLS, auth, `exec` and `ping`; auto‑reconnect.
+- **PowerShell implant** (Windows): Served via GET /sync; `exec` via cmd.exe; auto‑reconnect.
+- File upload/download: supported via operator API and implants when enabled (see Web UI File Manager).
 
 ## Requirements
 
@@ -75,10 +74,10 @@
 }
 ```
 
-### Client Configuration (config.json)
+### Client Configuration (config.json, in client directory)
 ```json
 {
-  "server_url": "wss://localhost:8443",
+  "server_url": "wss://localhost:8443/live",
   "client_id": "default_client",
   "client_secret": "change_this_secret",
   "cert_file": "server.crt"
@@ -103,19 +102,16 @@
 
 ## Usage
 
-### Server Commands
-1. View connected clients
-2. Execute commands:
-   - `ping`: Check client connectivity
-   - `exec`: Execute shell commands
-   - `fetch`: Download from URL
-   - `upload`: Upload files
+### Operator (stdin or HTTP API)
+- **list** – View connected sessions (GET /op/sessions).
+- **use** \<id\> – Select session (stdin only).
+- **exec** \<cmd\> – Run shell command on selected session (POST /op/exec).
+- **kill** – Drop a session (POST /op/kill; see API).
+- **health** – GET /op/health for server status.
 
 ### Client Features
-1. Automatic reconnection
-2. Command queuing
-3. File operations
-4. Heartbeat monitoring
+- Automatic reconnection (30s backoff).
+- Exec and ping; file upload/download via API when supported by implant.
 
 ## Troubleshooting
 

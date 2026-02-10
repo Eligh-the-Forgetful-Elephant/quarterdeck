@@ -131,6 +131,11 @@ REACT_APP_API_URL=https://localhost:8443 npm start
 
 Open http://localhost:3000. **Clients** lists sessions (from GET /op/sessions). **Console** lets you pick a session and run commands (POST /op/exec). See `web-ui/WEB_UI_API.md` for API details.
 
+## 8. Health and kill
+
+- **GET /op/health** – Same auth as other /op. Returns `{"ok": true, "sessions": N}`. Use for Dashboard or load balancers.
+- **POST /op/kill** – Body `{"session_id": "..."}`. Closes the WebSocket and removes the session. Use to drop a beacon.
+
 ## Quick reference
 
 | Item        | Value                          |
@@ -139,4 +144,6 @@ Open http://localhost:3000. **Clients** lists sessions (from GET /op/sessions). 
 | View URL   | `https://HOST:8443/view`        |
 | WebSocket  | `wss://HOST:8443/live`          |
 | List API   | `GET /op/sessions`              |
+| Health API | `GET /op/health`               |
 | Exec API   | `POST /op/exec` body `{"session_id","command"}` |
+| Kill API   | `POST /op/kill` body `{"session_id"}` |

