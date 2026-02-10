@@ -69,9 +69,16 @@ const Dashboard: React.FC = () => {
                 </Box>
               )}
               {API_BASE && !loading && (
-                <Typography color={health?.ok ? 'success.main' : 'textSecondary'}>
-                  {health?.ok ? 'Reachable' : 'Unreachable'}
-                </Typography>
+                <>
+                  <Typography color={health?.ok ? 'success.main' : 'error'}>
+                    {health?.ok ? 'Reachable' : 'Connection failed'}
+                  </Typography>
+                  {!health?.ok && (
+                    <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+                      Start the C2 server (e.g. <code>./server</code> or Docker) and ensure it listens on the API URL. If using Cursor&apos;s built-in browser, try opening the app in your system browser at http://localhost:3000.
+                    </Typography>
+                  )}
+                </>
               )}
             </CardContent>
           </Card>

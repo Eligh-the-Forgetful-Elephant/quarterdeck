@@ -13,6 +13,8 @@ bin/
 **/c2server
 **/client/client
 **/implant
+**/server/server
+**/web-ui/build
 
 # Certs (regenerate with generate_certs.sh)
 *.crt

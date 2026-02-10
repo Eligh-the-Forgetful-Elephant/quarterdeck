@@ -16,7 +16,7 @@ import { Refresh as RefreshIcon, Delete as KillIcon } from '@mui/icons-material'
 const API_BASE = process.env.REACT_APP_API_URL || '';
 const OP_TOKEN = process.env.REACT_APP_OP_TOKEN || '';
 
-type Session = { id: string; addr: string };
+type Session = { id: string; addr: string; platform?: string };
 
 const Clients: React.FC = () => {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -93,13 +93,14 @@ const Clients: React.FC = () => {
             <TableRow>
               <TableCell>Session ID</TableCell>
               <TableCell>Address</TableCell>
+              <TableCell>Platform</TableCell>
               <TableCell align="right">Actions</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {sessions.length === 0 && !loading && (
               <TableRow>
-                <TableCell colSpan={3} align="center">
+                <TableCell colSpan={4} align="center">
                   <Typography color="textSecondary">
                     No clients connected
                   </Typography>
@@ -110,6 +111,7 @@ const Clients: React.FC = () => {
               <TableRow key={s.id}>
                 <TableCell>{s.id}</TableCell>
                 <TableCell>{s.addr}</TableCell>
+                <TableCell>{s.platform || '—'}</TableCell>
                 <TableCell align="right">
                   <IconButton size="small" onClick={() => killSession(s.id)} title="Drop session">
                     <KillIcon />

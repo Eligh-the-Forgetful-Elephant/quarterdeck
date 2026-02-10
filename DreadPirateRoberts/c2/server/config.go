@@ -10,14 +10,24 @@ import (
 // configFilePath is the path to config.json; tests may override it.
 var configFilePath = "config.json"
 
+type ListenerConfig struct {
+	Port     int    `json:"port"`
+	TLS      bool   `json:"tls"`
+	CertFile string `json:"cert_file"`
+	KeyFile  string `json:"key_file"`
+}
+
 type ServerConfig struct {
-	Port         int    `json:"port"`
-	CertFile     string `json:"cert_file"`
-	KeyFile      string `json:"key_file"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	SyncToken string `json:"sync_token"` // optional: require ?k=SyncToken on GET /sync
-	OpToken   string `json:"op_token"`   // optional: require X-Op-Token or ?k= on GET/POST /op/*
+	Port         int              `json:"port"`
+	CertFile     string           `json:"cert_file"`
+	KeyFile      string           `json:"key_file"`
+	ClientID     string           `json:"client_id"`
+	ClientSecret string           `json:"client_secret"`
+	SyncToken    string           `json:"sync_token"`
+	OpToken      string           `json:"op_token"`
+	OpIdentity   string           `json:"op_identity"`
+	Listeners    []ListenerConfig `json:"listeners"` // if non-empty, use these instead of Port/CertFile/KeyFile
+	SocksPort    int              `json:"socks_port"` // 0 = disabled; SOCKS5 proxy via implant
 }
 
 func LoadConfig() *ServerConfig {

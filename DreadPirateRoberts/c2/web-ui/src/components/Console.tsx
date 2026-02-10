@@ -11,7 +11,8 @@ import {
   Grid,
   IconButton,
 } from '@mui/material';
-import { Send as SendIcon } from '@mui/icons-material';
+import { Send as SendIcon, VpnKey as CredsIcon } from '@mui/icons-material';
+import { getConsolePrefs, getTerminalStyles } from '../utils/consolePrefs';
 
 const API_BASE = process.env.REACT_APP_API_URL || '';
 const OP_TOKEN = process.env.REACT_APP_OP_TOKEN || '';
@@ -24,6 +25,15 @@ const Console: React.FC = () => {
   const [command, setCommand] = useState('');
   const [log, setLog] = useState<string[]>([]);
   const logEndRef = useRef<HTMLDivElement>(null);
+  const [prefs, setPrefs] = useState(() => getConsolePrefs());
+
+  useEffect(() => {
+    const onPrefsChange = () => setPrefs(getConsolePrefs());
+    window.addEventListener('console-prefs-changed', onPrefsChange);
+    return () => window.removeEventListener('console-prefs-changed', onPrefsChange);
+  }, []);
+
+  const terminalStyles = getTerminalStyles(prefs);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -63,6 +73,28 @@ const Console: React.FC = () => {
     }
   };
 
+  const runCreds = async () => {
+    if (!selectedId || !API_BASE) return;
+    setLog((prev) => [...prev, '$ Run creds (stub)']);
+    const headers: HeadersInit = { 'Content-Type': 'application/json' };
+    if (OP_TOKEN) headers['X-Op-Token'] = OP_TOKEN;
+    try {
+      const res = await fetch(`${API_BASE}/op/creds`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ session_id: selectedId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.output !== undefined) {
+        setLog((prev) => [...prev, data.output || '(no output)', data.error || '']);
+      } else {
+        setLog((prev) => [...prev, `Error: ${res.status} ${data.error || ''}`]);
+      }
+    } catch (e) {
+      setLog((prev) => [...prev, `Error: ${e}`]);
+    }
+  };
+
   const noApi = !API_BASE;
 
   return (
@@ -76,10 +108,11 @@ const Console: React.FC = () => {
             sx={{
               height: '60vh',
               p: 2,
-              backgroundColor: '#1e1e1e',
-              color: '#fff',
+              backgroundColor: terminalStyles.bgcolor,
+              color: terminalStyles.color,
               overflowY: 'auto',
               fontFamily: 'monospace',
+              fontSize: prefs.fontSize,
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-all',
             }}
@@ -139,8 +172,17 @@ const Console: React.FC = () => {
                 color="primary"
                 onClick={handleSend}
                 disabled={noApi || !selectedId || !command.trim()}
+                title="Send command"
               >
                 <SendIcon />
+              </IconButton>
+              <IconButton
+                color="secondary"
+                onClick={runCreds}
+                disabled={noApi || !selectedId}
+                title="Run creds (stub)"
+              >
+                <CredsIcon />
               </IconButton>
             </Grid>
           </Grid>

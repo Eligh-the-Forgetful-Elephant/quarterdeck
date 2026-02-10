@@ -19,6 +19,7 @@ const OP_TOKEN = process.env.REACT_APP_OP_TOKEN || '';
 type SessionRecord = {
   id: string;
   addr: string;
+  platform?: string;
   first_seen: string;
   last_seen: string;
 };
@@ -95,6 +96,7 @@ const SessionHistory: React.FC = () => {
             <TableRow>
               <TableCell>Session ID</TableCell>
               <TableCell>Address</TableCell>
+              <TableCell>Platform</TableCell>
               <TableCell>First seen</TableCell>
               <TableCell>Last seen</TableCell>
             </TableRow>
@@ -102,7 +104,7 @@ const SessionHistory: React.FC = () => {
           <TableBody>
             {sessions.length === 0 && !loading && (
               <TableRow>
-                <TableCell colSpan={4} align="center">
+                <TableCell colSpan={5} align="center">
                   <Typography color="textSecondary">
                     No session history yet
                   </Typography>
@@ -113,6 +115,7 @@ const SessionHistory: React.FC = () => {
               <TableRow key={`${s.id}-${s.last_seen}`}>
                 <TableCell>{s.id}</TableCell>
                 <TableCell>{s.addr || '—'}</TableCell>
+                <TableCell>{s.platform || '—'}</TableCell>
                 <TableCell>{formatTime(s.first_seen)}</TableCell>
                 <TableCell>{formatTime(s.last_seen)}</TableCell>
               </TableRow>

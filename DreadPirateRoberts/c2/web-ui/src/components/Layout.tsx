@@ -19,7 +19,11 @@ import {
   Computer as ComputerIcon,
   History as HistoryIcon,
   Terminal as TerminalIcon,
+  PhotoCamera as ScreenshotIcon,
+  List as ProcessListIcon,
+  Keyboard as KeylogIcon,
   Folder as FolderIcon,
+  Assignment as AuditIcon,
   Settings as SettingsIcon,
 } from '@mui/icons-material';
 import { QuarterdeckLogo } from './QuarterdeckLogo';
@@ -41,7 +45,11 @@ const Layout: React.FC = () => {
     { text: 'Clients', icon: <ComputerIcon />, path: '/clients' },
     { text: 'Session history', icon: <HistoryIcon />, path: '/history' },
     { text: 'Console', icon: <TerminalIcon />, path: '/console' },
+    { text: 'Screenshot', icon: <ScreenshotIcon />, path: '/screenshot' },
+    { text: 'Processes', icon: <ProcessListIcon />, path: '/processes' },
+    { text: 'Keylog', icon: <KeylogIcon />, path: '/keylog' },
     { text: 'Files', icon: <FolderIcon />, path: '/files' },
+    { text: 'Audit', icon: <AuditIcon />, path: '/audit' },
     { text: 'Settings', icon: <SettingsIcon />, path: '/settings' },
   ];
 

