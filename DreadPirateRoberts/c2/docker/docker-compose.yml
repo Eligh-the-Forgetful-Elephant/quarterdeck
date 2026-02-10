@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # Web UI - React frontend
+  web-ui:
+    build:
+      context: ../web-ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    environment:
+      - REACT_APP_API_URL=http://localhost:8080
+
+  # API Gateway - Go backend
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=redis
+      - JWT_SECRET=changeme_in_production
+
+  # C2 Server - Our existing Go server
+  c2-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.c2
+    ports:
+      - "8443:8443"
+    volumes:
+      - ../server.crt:/app/server.crt
+      - ../server.key:/app/server.key
+    depends_on:
+      - db
+      - redis
+
+  # Database - PostgreSQL
+  db:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=c2admin
+      - POSTGRES_PASSWORD=changeme_in_production
+      - POSTGRES_DB=c2db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Redis - For caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data: 

