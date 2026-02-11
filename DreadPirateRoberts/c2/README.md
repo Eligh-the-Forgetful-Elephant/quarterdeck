@@ -39,13 +39,20 @@
 
 2. Build the system:
    ```bash
-   cd c2
+   cd DreadPirateRoberts/c2
    ./build.sh
    ```
    This will:
-   - Generate self-signed TLS certificates
-   - Build the server
-   - Build the client
+   - Generate self-signed TLS certificates (server/ and client/)
+   - Build the server (`server/c2server`)
+   - Build the client (`client/client`)
+
+   **Build everything (including web UI):**
+   ```bash
+   cd DreadPirateRoberts/c2
+   ./build-all.sh
+   ```
+   Requires: Go, OpenSSL, Node/npm. Fixes invalid `GOROOT` automatically so the Go build works on this machine.
 
 3. Configure the server:
    ```bash

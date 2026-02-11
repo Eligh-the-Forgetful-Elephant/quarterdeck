@@ -11,6 +11,7 @@ import Screenshot from './components/Screenshot';
 import ProcessList from './components/ProcessList';
 import Keylog from './components/Keylog';
 import { Audit } from './components';
+import C2Log from './components/C2Log';
 import Settings from './components/Settings';
 import { WaveBackground } from './components/WaveBackground';
 
@@ -83,6 +84,7 @@ const App: React.FC = () => {
             <Route path="processes" element={<ProcessList />} />
             <Route path="keylog" element={<Keylog />} />
             <Route path="audit" element={<Audit />} />
+            <Route path="c2log" element={<C2Log />} />
             <Route path="files" element={<FileManager />} />
             <Route path="settings" element={<Settings />} />
           </Route>

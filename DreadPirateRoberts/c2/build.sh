@@ -1,35 +1,25 @@
 #!/bin/bash
+# Build C2 server + client (and certs). Run from DreadPirateRoberts/c2.
+# Use ./build-all.sh to also build the web UI.
+set -e
+C2_ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$C2_ROOT"
 
-# Use default GOROOT (e.g. Homebrew) if env has invalid GOROOT (e.g. from g-install when ~/.go missing)
+# Use default GOROOT when env has invalid GOROOT (e.g. from g-install when ~/.go missing)
 if [ -n "$GOROOT" ] && [ ! -d "$GOROOT" ]; then unset GOROOT; fi
 
-# Make scripts executable
-chmod +x generate_certs.sh
+chmod +x generate_certs.sh 2>/dev/null || true
+chmod +x server/build.sh client/build.sh 2>/dev/null || true
 
-# Generate TLS certificates
 echo "Generating TLS certificates..."
 ./generate_certs.sh
 
-# Build Go server
 echo "Building Go server..."
-cd server
-go build -o c2server
-if [ $? -ne 0 ]; then
-    echo "Failed to build Go server"
-    exit 1
-fi
-cd ..
+./server/build.sh
 
-# Build Go client
 echo "Building Go client..."
-cd client
-go build -o client
-if [ $? -ne 0 ]; then
-    echo "Failed to build Go client"
-    exit 1
-fi
-cd ..
+./client/build.sh
 
 echo "Build complete!"
-echo "To run the server: cd server && ./c2server"
-echo "To run the client: cd client && ./client" 
+echo "  Server: cd server && ./c2server"
+echo "  Client: cd client && ./client" 

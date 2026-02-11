@@ -14,11 +14,12 @@
 #include <signal.h>
 #include <sys/ptrace.h>
 #include <unordered_map>
+#include <sstream>
 
 std::string getBanner() {
     return R"(
 
-                                                                                                    
+
                                                                                                     
                                                                                                     
                                                   ▓██                                               
@@ -247,4 +248,3 @@ int main() {
 
     return 0;
 }
-

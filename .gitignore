@@ -20,6 +20,13 @@ bin/
 *.crt
 *.key
 
+# C2 server runtime (generated when server runs)
+**/c2_sessions.jsonl
+**/c2_traffic.jsonl
+**/c2_audit.jsonl
+**/c2_audit.log
+**/provisions.json
+
 # IDE / editor
 .idea/
 *.swp

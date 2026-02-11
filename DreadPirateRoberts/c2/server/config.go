@@ -18,27 +18,29 @@ type ListenerConfig struct {
 }
 
 type ServerConfig struct {
-	Port         int              `json:"port"`
-	CertFile     string           `json:"cert_file"`
-	KeyFile      string           `json:"key_file"`
-	ClientID     string           `json:"client_id"`
-	ClientSecret string           `json:"client_secret"`
-	SyncToken    string           `json:"sync_token"`
-	OpToken      string           `json:"op_token"`
-	OpIdentity   string           `json:"op_identity"`
-	Listeners    []ListenerConfig `json:"listeners"` // if non-empty, use these instead of Port/CertFile/KeyFile
-	SocksPort    int              `json:"socks_port"` // 0 = disabled; SOCKS5 proxy via implant
+	Port          int              `json:"port"`
+	CertFile      string           `json:"cert_file"`
+	KeyFile       string           `json:"key_file"`
+	ClientID      string           `json:"client_id"`
+	ClientSecret  string           `json:"client_secret"`
+	SyncToken     string           `json:"sync_token"`
+	OpToken       string           `json:"op_token"`
+	OpIdentity    string           `json:"op_identity"`
+	Listeners     []ListenerConfig `json:"listeners"` // if non-empty, use these instead of Port/CertFile/KeyFile
+	SocksPort     int              `json:"socks_port"`    // 0 = disabled; SOCKS5 proxy via implant
+	SessionTTLSec int              `json:"session_ttl_sec"` // 0 = no expiry; else session closed after this many seconds idle
 }
 
 func LoadConfig() *ServerConfig {
 	config := &ServerConfig{
-		Port:         8443,
-		CertFile:     "server.crt",
-		KeyFile:      "server.key",
-		ClientID:     "default_client",
-		ClientSecret: "change_this_secret",
-		SyncToken: "",
-		OpToken:   "",
+		Port:          8443,
+		CertFile:      "server.crt",
+		KeyFile:       "server.key",
+		ClientID:      "default_client",
+		ClientSecret:  "change_this_secret",
+		SyncToken:     "",
+		OpToken:       "",
+		SessionTTLSec: 0,
 	}
 
 	// Try to load from config file
